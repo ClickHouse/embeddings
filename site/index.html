@@ -98,7 +98,7 @@ function tileSQL(table) {
         tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
     FROM (
         SELECT px, py,
-            colorOKLCHToSRGB((0.35 + 0.5 * least(cnt / q, 1.0), 0.16, hue * 360)) AS c
+            colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
         FROM (
             SELECT px, py, cnt, hue, quantile(0.99)(cnt) OVER () AS q FROM (
                 SELECT toUInt16(intDiv((x - tx0) * ${TILE}, ts)) AS px,
