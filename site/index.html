@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Embeddings Explorer — ClickHouse</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+    html, body { margin: 0; height: 100%; background: #000; color: #eee;
+        font-family: system-ui, sans-serif; overflow: hidden; }
+    #map { position: absolute; inset: 0; background: #000; cursor: crosshair; }
+    .leaflet-container { background: #000; }
+    #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
+        display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
+        padding: .4em .6em; background: rgba(20,20,20,.88); font-size: 13px; }
+    #panel b { color: #ffd54f; }
+    .grp { display: flex; gap: .15em; align-items: center; }
+    .grp label { color: #999; margin-right: .25em; }
+    .opt { padding: .2em .5em; background: #333; border: 1px solid #000; cursor: pointer; user-select: none; }
+    .opt:hover { background: #ffd54f; color: #000; }
+    .opt.sel { background: #fff; color: #000; }
+    #status { margin-left: auto; color: #8bc34a; font-family: monospace; }
+    #report { position: absolute; top: 0; right: 0; bottom: 0; width: 40%; max-width: 640px;
+        z-index: 1002; background: rgba(15,15,15,.97); overflow-y: auto; display: none;
+        padding: .6em; box-shadow: -4px 0 20px rgba(0,0,0,.7); }
+    #report h3 { margin: .2em 0 .5em; color: #ffd54f; }
+    #report .close { float: right; cursor: pointer; color: #f66; font-size: 18px; }
+    #grid { display: grid; grid-template-columns: repeat(auto-fill, 75px); gap: 3px; }
+    #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
+        border: 1px solid #333; background: #222; }
+    #grid img:hover { border-color: #ffd54f; }
+    #full { position: absolute; inset: 0; z-index: 1003; background: rgba(0,0,0,.92);
+        display: none; align-items: center; justify-content: center; cursor: zoom-out; }
+    #full img { max-width: 92%; max-height: 92%; box-shadow: 0 0 40px #000; }
+    #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
+        background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
+    a { color: #90caf9; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+    <b>Embeddings Explorer</b>
+    <div class="grp"><label>dataset</label><span id="datasets"></span></div>
+    <div class="grp"><label>mode</label><span id="modes"></span></div>
+    <div class="grp"><label>vectors</label><span id="reprs"></span></div>
+    <span id="status">ready</span>
+</div>
+<div id="report"><span class="close" onclick="hideReport()">✕</span><div id="report-body"></div></div>
+<div id="full" onclick="this.style.display='none'"><img id="full-img"></div>
+<div id="error"></div>
+<script>
+/// ---- Config ----
+const HOST = 'https://hvdvsqo23t.us-east-2.aws.clickhouse-staging.com:8443';
+const USER = 'website';
+const PASS = 'Embeddings-Viewer-2026!';
+const THUMBS = 'mmcommons.image_thumbs2';
+const S3 = 'https://multimedia-commons.s3.us-west-2.amazonaws.com/data/images';
+const TILE = 1024;                 /// tile pixel size
+const COORD_BITS = 32;             /// x,y live in [0, 2^32)
+const DATASETS = {
+    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152 },
+    clip:    { table: 'mmcommons.emb_clip',    dim: 768  },
+    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768  },
+};
+const REPRS = {           /// vector column used for cosine similarity in the report
+    original: 'embedding',
+    rotated:  'embedding_rotated',
+};
+let dataset = 'siglip2';
+let mode = 'points';      /// 'points' | 'thumbs'
+let repr = 'original';
+
+/// ---- ClickHouse HTTP ----
+function chURL(extra) {
+    return `${HOST}/?user=${USER}&password=${encodeURIComponent(PASS)}&${extra}`;
+}
+async function chQuery(sql, params, fmt) {
+    let extra = `default_format=${fmt || 'RowBinary'}&replace_running_query=1`;
+    for (const k in (params || {})) extra += `&param_${k}=${encodeURIComponent(params[k])}`;
+    const resp = await fetch(chURL(extra), { method: 'POST', body: sql });
+    if (!resp.ok) throw new Error(await resp.text());
+    return resp;
+}
+function showError(t) { const e = document.getElementById('error'); e.textContent = t; e.style.display = 'block'; }
+function hideError() { document.getElementById('error').style.display = 'none'; }
+function setStatus(t) { document.getElementById('status').textContent = t; }
+
+/// ---- Point-cloud tile query ----
+/// Returns sparse pixels (px UInt16, py UInt16, r UInt8, g UInt8, b UInt8) in RowBinary.
+function tileSQL() {
+    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0
+    SELECT px, py,
+        tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
+    FROM (
+        SELECT px, py,
+            colorOKLCHToSRGB((0.35 + 0.5 * least(cnt / q, 1.0), 0.16, hue * 360)) AS c
+        FROM (
+            SELECT px, py, cnt, hue, quantile(0.99)(cnt) OVER () AS q FROM (
+                SELECT toUInt16(intDiv((x - tx0) * ${TILE}, ts)) AS px,
+                       toUInt16(intDiv((y - ty0) * ${TILE}, ts)) AS py,
+                       count() AS cnt, avg(z) / 65535 AS hue
+                FROM {table:Identifier}
+                WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
+                GROUP BY px, py
+            )
+        )
+    ) FORMAT RowBinary`;
+}
+/// One representative md5 per 75px cell for the thumbnails overlay.
+function thumbCellsSQL() {
+    const CELL = 75;
+    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
+        ts * ${CELL} / ${TILE} AS cell
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
+    FROM (
+        SELECT intDiv(x - tx0, cell) AS cx, intDiv(y - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
+        FROM {table:Identifier}
+        WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
+    )
+    GROUP BY cx, cy
+    FORMAT RowBinary`;
+}
+
+/// ---- Rendering ----
+async function renderTile(coords, canvas) {
+    const table = DATASETS[dataset].table;
+    const p = { z: coords.z, x: coords.x, y: coords.y, table };
+    const ctx = canvas.getContext('2d');
+    try {
+        if (mode === 'thumbs') { await renderThumbs(p, ctx); return; }
+        const buf = await (await chQuery(tileSQL(), p)).arrayBuffer();
+        const dv = new DataView(buf);
+        const img = ctx.createImageData(TILE, TILE);
+        for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
+            const px = dv.getUint16(o, true), py = dv.getUint16(o + 2, true);
+            const i = (py * TILE + px) * 4;
+            img.data[i] = dv.getUint8(o + 4); img.data[i+1] = dv.getUint8(o + 5);
+            img.data[i+2] = dv.getUint8(o + 6); img.data[i+3] = 255;
+        }
+        ctx.putImageData(img, 0, 0);
+        hideError();
+    } catch (e) { showError(String(e).slice(0, 500)); }
+}
+async function renderThumbs(p, ctx) {
+    /// draw the faint point cloud first, then thumbnails on top
+    const buf = await (await chQuery(tileSQL(), p)).arrayBuffer();
+    const dv = new DataView(buf), img = ctx.createImageData(TILE, TILE);
+    for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
+        const px = dv.getUint16(o, true), py = dv.getUint16(o + 2, true), i = (py*TILE+px)*4;
+        img.data[i] = dv.getUint8(o+4)>>1; img.data[i+1] = dv.getUint8(o+5)>>1;
+        img.data[i+2] = dv.getUint8(o+6)>>1; img.data[i+3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    const cells = new Uint8Array(await (await chQuery(thumbCellsSQL(), p)).arrayBuffer());
+    /// rows: px UInt16, py UInt16, md5 String(varint len + bytes)
+    let o = 0;
+    while (o + 4 < cells.length) {
+        const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
+        let len = cells[o++]; /// md5 <= 127 bytes -> single varint byte
+        const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
+        drawThumb(ctx, px, py, md5);
+    }
+    hideError();
+}
+function drawThumb(ctx, px, py, md5) {
+    const im = new Image(); im.crossOrigin = 'anonymous';
+    im.onload = () => ctx.drawImage(im, px, py, 75, 75);
+    im.src = thumbURL(md5);
+}
+function thumbURL(md5) {
+    const sql = `WITH (SELECT thumb FROM ${THUMBS} WHERE md5 = {md5:String}) AS t
+        SELECT (number % 75) AS x, intDiv(number, 75) AS y, t[number*3+1] AS r, t[number*3+2] AS g, t[number*3+3] AS b
+        FROM numbers(75*75) ORDER BY y, x
+        FORMAT PNG SETTINGS output_format_image_width = 75, output_format_image_height = 75`;
+    return chURL(`default_format=PNG&param_md5=${md5}&query=${encodeURIComponent(sql)}`);
+}
+function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}.jpg`; }
+
+/// ---- Map ----
+const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 22,
+    center: [TILE/2, TILE/2], zoom: 2, zoomControl: true, attributionControl: false });
+let layer = null;
+function makeLayer() {
+    if (layer) map.removeLayer(layer);
+    const Grid = L.GridLayer.extend({ createTile: function(coords, done) {
+        const c = L.DomUtil.create('canvas', 'leaflet-tile');
+        c.width = TILE; c.height = TILE;
+        renderTile(coords, c).then(() => done(null, c));
+        return c;
+    }});
+    layer = new Grid({ tileSize: TILE, minZoom: 0, maxZoom: 22, maxNativeZoom: 20, minNativeZoom: 0 });
+    layer.addTo(map);
+}
+function redraw() { if (layer) layer.redraw(); }
+
+/// data coords (0..2^32) <-> Leaflet CRS.Simple point (0..TILE at zoom 0)
+function latlngToData(latlng) {
+    const pt = map.project(latlng, 0);   /// CRS pixels at zoom 0, in [0, TILE)
+    const s = Math.pow(2, COORD_BITS) / TILE;
+    return { x: Math.max(0, Math.min(0xFFFFFFFF, Math.round(pt.x * s))),
+             y: Math.max(0, Math.min(0xFFFFFFFF, Math.round(pt.y * s))) };
+}
+
+/// ---- Click -> nearest point -> report ----
+map.on('click', async (e) => {
+    const d = latlngToData(e.latlng);
+    const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
+    const r = Math.round(px * 6);
+    setStatus('finding nearest point…');
+    try {
+        const sql = `SELECT md5 FROM {table:Identifier}
+            WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
+              AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
+            ORDER BY (toInt64(x)-toInt64({cx:UInt32}))^2 + (toInt64(y)-toInt64({cy:UInt32}))^2 ASC
+            LIMIT 1 FORMAT TSV`;
+        const md5 = (await (await chQuery(sql, { table: DATASETS[dataset].table, cx: d.x, cy: d.y, r })).text()).trim();
+        if (md5) showReport(md5); else setStatus('no point near click');
+    } catch (err) { showError(String(err).slice(0, 500)); }
+});
+
+async function showReport(md5) {
+    const table = DATASETS[dataset].table, col = REPRS[repr] || 'embedding';
+    setStatus('computing top-100 similar…');
+    const body = document.getElementById('report-body');
+    body.innerHTML = `<h3>Top-100 similar</h3><div>query: <a href="${fullURL(md5)}" target=_blank>${md5}</a>
+        · ${dataset} · cosine over <b>${col}</b></div><div id="grid"></div>`;
+    document.getElementById('report').style.display = 'block';
+    const grid = document.getElementById('grid');
+    grid.innerHTML = `<img src="${thumbURL(md5)}" title="query" style="border-color:#ffd54f">`;
+    try {
+        const sql = `WITH (SELECT ${col} FROM {table:Identifier} WHERE md5 = {md5:String} LIMIT 1) AS target
+            SELECT md5 FROM {table:Identifier}
+            WHERE md5 != {md5:String}
+            ORDER BY cosineDistance(${col}, target) ASC
+            LIMIT 100 FORMAT TSV`;
+        const rows = (await (await chQuery(sql, { table, md5 })).text()).trim().split('\n').filter(Boolean);
+        for (const m of rows) {
+            const img = document.createElement('img');
+            img.src = thumbURL(m); img.title = m;
+            img.onclick = () => showFull(m);
+            grid.appendChild(img);
+        }
+        setStatus(`report: ${rows.length} results`);
+    } catch (err) { showError(String(err).slice(0, 500)); }
+}
+function showFull(md5) {
+    document.getElementById('full-img').src = fullURL(md5);
+    document.getElementById('full').style.display = 'flex';
+}
+function hideReport() { document.getElementById('report').style.display = 'none'; }
+
+/// ---- Switchers ----
+function buildSwitch(elemId, keys, current, onPick) {
+    const el = document.getElementById(elemId); el.innerHTML = '';
+    keys.forEach(k => {
+        const s = document.createElement('span'); s.className = 'opt' + (k === current ? ' sel' : '');
+        s.textContent = k;
+        s.onclick = () => { [...el.children].forEach(c => c.classList.remove('sel')); s.classList.add('sel'); onPick(k); };
+        el.appendChild(s);
+    });
+}
+buildSwitch('datasets', Object.keys(DATASETS), dataset, k => { dataset = k; makeLayer(); });
+buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; redraw(); });
+buildSwitch('reprs', Object.keys(REPRS), repr, k => { repr = k; });
+
+makeLayer();
+</script>
+</body>
+</html>

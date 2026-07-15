@@ -1,0 +1,11 @@
+clickhouse
+clickhouse-*
+*.parquet
+*.log
+*.png
+*.jpg
+*.bin
+*.txt
+data/
+ann_done/
+thumb*_done/
