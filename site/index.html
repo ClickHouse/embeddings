@@ -182,17 +182,27 @@ function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}
 
 /// ---- Map ----
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 22,
-    center: [TILE/2, TILE/2], zoom: 2, zoomControl: true, attributionControl: false });
+    zoomControl: true, attributionControl: false });
+/// world = the 2^32 data plane (crs pixels [0,TILE] at zoom 0)
+const worldBounds = L.latLngBounds(map.unproject([0, TILE], 0), map.unproject([TILE, 0], 0));
+map.setMaxBounds(worldBounds.pad(0.3));
+map.fitBounds(worldBounds);
 let layer = null;
 function makeLayer() {
     if (layer) map.removeLayer(layer);
     const Grid = L.GridLayer.extend({ createTile: function(coords, done) {
         const c = L.DomUtil.create('canvas', 'leaflet-tile');
         c.width = TILE; c.height = TILE;
-        renderTile(coords, c).then(() => done(null, c));
+        const n = Math.pow(2, coords.z);   /// valid tile coords: 0 <= x,y < 2^z
+        if (coords.x < 0 || coords.y < 0 || coords.x >= n || coords.y >= n) {
+            setTimeout(() => done(null, c), 0);   /// transparent tile, no query
+            return c;
+        }
+        renderTile(coords, c).then(() => done(null, c)).catch(() => done(null, c));
         return c;
     }});
-    layer = new Grid({ tileSize: TILE, minZoom: 0, maxZoom: 22, maxNativeZoom: 20, minNativeZoom: 0 });
+    layer = new Grid({ tileSize: TILE, minZoom: 0, maxZoom: 22, maxNativeZoom: 20, minNativeZoom: 0,
+        bounds: worldBounds, noWrap: true });
     layer.addTo(map);
 }
 function redraw() { if (layer) layer.redraw(); }
