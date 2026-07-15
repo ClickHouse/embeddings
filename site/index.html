@@ -71,6 +71,7 @@ const REPRS = {           /// vector column used for cosine similarity in the re
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
 let repr = 'original';
+const curTable = () => DATASETS[dataset].table;
 
 /// ---- ClickHouse HTTP ----
 function chURL(extra) {
@@ -88,8 +89,9 @@ function hideError() { document.getElementById('error').style.display = 'none'; 
 function setStatus(t) { document.getElementById('status').textContent = t; }
 
 /// ---- Point-cloud tile query ----
-/// Returns sparse pixels (px UInt16, py UInt16, r UInt8, g UInt8, b UInt8) in RowBinary.
-function tileSQL() {
+/// Table name comes from our own config, so it is interpolated (not a {:Identifier} param,
+/// which would wrap the dotted db.table in backticks as a single identifier).
+function tileSQL(table) {
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0
     SELECT px, py,
@@ -102,7 +104,7 @@ function tileSQL() {
                 SELECT toUInt16(intDiv((x - tx0) * ${TILE}, ts)) AS px,
                        toUInt16(intDiv((y - ty0) * ${TILE}, ts)) AS py,
                        count() AS cnt, avg(z) / 65535 AS hue
-                FROM {table:Identifier}
+                FROM ${table}
                 WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
                 GROUP BY px, py
             )
@@ -110,7 +112,7 @@ function tileSQL() {
     ) FORMAT RowBinary`;
 }
 /// One representative md5 per 75px cell for the thumbnails overlay.
-function thumbCellsSQL() {
+function thumbCellsSQL(table) {
     const CELL = 75;
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
@@ -118,7 +120,7 @@ function thumbCellsSQL() {
     SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
     FROM (
         SELECT intDiv(x - tx0, cell) AS cx, intDiv(y - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
-        FROM {table:Identifier}
+        FROM ${table}
         WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
     )
     GROUP BY cx, cy
@@ -127,12 +129,12 @@ function thumbCellsSQL() {
 
 /// ---- Rendering ----
 async function renderTile(coords, canvas) {
-    const table = DATASETS[dataset].table;
-    const p = { z: coords.z, x: coords.x, y: coords.y, table };
+    const table = curTable();
+    const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
     try {
-        if (mode === 'thumbs') { await renderThumbs(p, ctx); return; }
-        const buf = await (await chQuery(tileSQL(), p)).arrayBuffer();
+        if (mode === 'thumbs') { await renderThumbs(p, table, ctx); return; }
+        const buf = await (await chQuery(tileSQL(table), p)).arrayBuffer();
         const dv = new DataView(buf);
         const img = ctx.createImageData(TILE, TILE);
         for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
@@ -145,9 +147,9 @@ async function renderTile(coords, canvas) {
         hideError();
     } catch (e) { showError(String(e).slice(0, 500)); }
 }
-async function renderThumbs(p, ctx) {
-    /// draw the faint point cloud first, then thumbnails on top
-    const buf = await (await chQuery(tileSQL(), p)).arrayBuffer();
+async function renderThumbs(p, table, ctx) {
+    /// faint point cloud first, then thumbnails on top
+    const buf = await (await chQuery(tileSQL(table), p)).arrayBuffer();
     const dv = new DataView(buf), img = ctx.createImageData(TILE, TILE);
     for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
         const px = dv.getUint16(o, true), py = dv.getUint16(o + 2, true), i = (py*TILE+px)*4;
@@ -155,19 +157,18 @@ async function renderThumbs(p, ctx) {
         img.data[i+2] = dv.getUint8(o+6)>>1; img.data[i+3] = 255;
     }
     ctx.putImageData(img, 0, 0);
-    const cells = new Uint8Array(await (await chQuery(thumbCellsSQL(), p)).arrayBuffer());
-    /// rows: px UInt16, py UInt16, md5 String(varint len + bytes)
+    const cells = new Uint8Array(await (await chQuery(thumbCellsSQL(table), p)).arrayBuffer());
     let o = 0;
     while (o + 4 < cells.length) {
         const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
-        let len = cells[o++]; /// md5 <= 127 bytes -> single varint byte
+        const len = cells[o++];               /// md5 <= 127 bytes -> single varint byte
         const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
         drawThumb(ctx, px, py, md5);
     }
     hideError();
 }
 function drawThumb(ctx, px, py, md5) {
-    const im = new Image(); im.crossOrigin = 'anonymous';
+    const im = new Image();
     im.onload = () => ctx.drawImage(im, px, py, 75, 75);
     im.src = thumbURL(md5);
 }
@@ -176,7 +177,7 @@ function thumbURL(md5) {
         SELECT (number % 75) AS x, intDiv(number, 75) AS y, t[number*3+1] AS r, t[number*3+2] AS g, t[number*3+3] AS b
         FROM numbers(75*75) ORDER BY y, x
         FORMAT PNG SETTINGS output_format_image_width = 75, output_format_image_height = 75`;
-    return chURL(`default_format=PNG&param_md5=${md5}&query=${encodeURIComponent(sql)}`);
+    return chURL(`default_format=PNG&param_md5=${encodeURIComponent(md5)}&query=${encodeURIComponent(sql)}`);
 }
 function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}.jpg`; }
 
@@ -207,9 +208,9 @@ function makeLayer() {
 }
 function redraw() { if (layer) layer.redraw(); }
 
-/// data coords (0..2^32) <-> Leaflet CRS.Simple point (0..TILE at zoom 0)
+/// data coords (0..2^32) from a Leaflet CRS.Simple latlng
 function latlngToData(latlng) {
-    const pt = map.project(latlng, 0);   /// CRS pixels at zoom 0, in [0, TILE)
+    const pt = map.project(latlng, 0);   /// crs pixels at zoom 0, in [0, TILE)
     const s = Math.pow(2, COORD_BITS) / TILE;
     return { x: Math.max(0, Math.min(0xFFFFFFFF, Math.round(pt.x * s))),
              y: Math.max(0, Math.min(0xFFFFFFFF, Math.round(pt.y * s))) };
@@ -217,23 +218,24 @@ function latlngToData(latlng) {
 
 /// ---- Click -> nearest point -> report ----
 map.on('click', async (e) => {
+    const table = curTable();
     const d = latlngToData(e.latlng);
     const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
-    const r = Math.round(px * 6);
+    const r = Math.max(1, Math.round(px * 6));
     setStatus('finding nearest point…');
     try {
-        const sql = `SELECT md5 FROM {table:Identifier}
+        const sql = `SELECT md5 FROM ${table}
             WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
               AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
             ORDER BY (toInt64(x)-toInt64({cx:UInt32}))^2 + (toInt64(y)-toInt64({cy:UInt32}))^2 ASC
             LIMIT 1 FORMAT TSV`;
-        const md5 = (await (await chQuery(sql, { table: DATASETS[dataset].table, cx: d.x, cy: d.y, r })).text()).trim();
+        const md5 = (await (await chQuery(sql, { cx: d.x, cy: d.y, r })).text()).trim();
         if (md5) showReport(md5); else setStatus('no point near click');
     } catch (err) { showError(String(err).slice(0, 500)); }
 });
 
 async function showReport(md5) {
-    const table = DATASETS[dataset].table, col = REPRS[repr] || 'embedding';
+    const table = curTable(), col = REPRS[repr] || 'embedding';
     setStatus('computing top-100 similar…');
     const body = document.getElementById('report-body');
     body.innerHTML = `<h3>Top-100 similar</h3><div>query: <a href="${fullURL(md5)}" target=_blank>${md5}</a>
@@ -242,12 +244,12 @@ async function showReport(md5) {
     const grid = document.getElementById('grid');
     grid.innerHTML = `<img src="${thumbURL(md5)}" title="query" style="border-color:#ffd54f">`;
     try {
-        const sql = `WITH (SELECT ${col} FROM {table:Identifier} WHERE md5 = {md5:String} LIMIT 1) AS target
-            SELECT md5 FROM {table:Identifier}
+        const sql = `WITH (SELECT ${col} FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS target
+            SELECT md5 FROM ${table}
             WHERE md5 != {md5:String}
             ORDER BY cosineDistance(${col}, target) ASC
             LIMIT 100 FORMAT TSV`;
-        const rows = (await (await chQuery(sql, { table, md5 })).text()).trim().split('\n').filter(Boolean);
+        const rows = (await (await chQuery(sql, { md5 })).text()).trim().split('\n').filter(Boolean);
         for (const m of rows) {
             const img = document.createElement('img');
             img.src = thumbURL(m); img.title = m;
