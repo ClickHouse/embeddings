@@ -20,8 +20,8 @@
         box-shadow: 0 0 12px #000; }
     /* top-K result thumbnails overlaid on the point cloud, centered on each image's (x,y) point */
     .topk-marker { background: none; border: 0; }
-    .topk-marker img { width: 75px; height: 75px; box-sizing: border-box; display: block;
-        image-rendering: pixelated; border: 2px solid rgba(255,213,79,.9); box-shadow: 0 0 6px #000; cursor: pointer; }
+    .topk-marker img { box-sizing: border-box; display: block; image-rendering: pixelated;
+        border: 1px solid rgba(255,213,79,.9); box-shadow: 0 0 5px #000; cursor: pointer; }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
@@ -272,20 +272,50 @@ function redraw() { if (layer) layer.redraw(); }
 /// ---- top-K overlay: result thumbnails placed on the map at their (x,y) points ----
 let reportActive = false;
 const topkLayer = L.layerGroup();
+let overlayPts = [];                                         /// [{md5, ll, marker, size}]
+const MAX_THUMB = 75, MIN_THUMB = 12;
 /// inverse of latlngToData: data coords (0..2^32) -> CRS.Simple latlng
 function dataToLatLng(x, y) { const s = Math.pow(2, COORD_BITS) / TILE; return map.unproject([x / s, y / s], 0); }
-function clearOverlay() { topkLayer.clearLayers(); }
-function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> 75px thumbnail markers centered on each point
+function overlayIcon(md5, size) {
+    return L.divIcon({ className: 'topk-marker',
+        html: `<img src="${thumbURL(md5)}" draggable="false" style="width:${size}px;height:${size}px">`,
+        iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+}
+function clearOverlay() { topkLayer.clearLayers(); overlayPts = []; }
+function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail markers centered on each point
     for (const r of rows) {
-        const icon = L.divIcon({ className: 'topk-marker', html: `<img src="${thumbURL(r.md5)}" draggable="false">`,
-            iconSize: [75, 75], iconAnchor: [37.5, 37.5] });
-        L.marker(dataToLatLng(+r.x, +r.y), { icon, keyboard: false, riseOnHover: true })
+        const ll = dataToLatLng(+r.x, +r.y);
+        const marker = L.marker(ll, { icon: overlayIcon(r.md5, MAX_THUMB), keyboard: false, riseOnHover: true })
             .on('click', () => showReport(r.md5))
             .on('mouseover', () => previewImg(r.md5))
             .on('mouseout', hidePreview)
             .addTo(topkLayer);
+        overlayPts.push({ md5: r.md5, ll, marker, size: MAX_THUMB });
+    }
+    sizeOverlay();
+}
+/// Size each thumbnail to its nearest-neighbor screen distance (clamped) so overlapping ones shrink.
+/// Screen distances depend only on zoom, so recompute after load and on zoomend. Grid = O(n).
+function sizeOverlay() {
+    if (!overlayPts.length) return;
+    const CELL = MAX_THUMB, grid = new Map();
+    for (const p of overlayPts) p.cp = map.latLngToContainerPoint(p.ll);
+    for (const p of overlayPts) {
+        const k = Math.floor(p.cp.x / CELL) + ',' + Math.floor(p.cp.y / CELL);
+        let a = grid.get(k); if (!a) grid.set(k, a = []); a.push(p);
+    }
+    for (const p of overlayPts) {
+        const cx = Math.floor(p.cp.x / CELL), cy = Math.floor(p.cp.y / CELL);
+        let nn = MAX_THUMB;
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+            const a = grid.get((cx + dx) + ',' + (cy + dy)); if (!a) continue;
+            for (const o of a) { if (o === p) continue; const d = Math.hypot(p.cp.x - o.cp.x, p.cp.y - o.cp.y); if (d < nn) nn = d; }
+        }
+        const size = Math.max(MIN_THUMB, Math.min(MAX_THUMB, Math.round(nn / 4) * 4));   /// quantized -> fewer setIcon calls
+        if (size !== p.size) { p.size = size; p.marker.setIcon(overlayIcon(p.md5, size)); }
     }
 }
+map.on('zoomend', sizeOverlay);
 
 /// data coords (0..2^32) from a Leaflet CRS.Simple latlng
 function latlngToData(latlng) {
