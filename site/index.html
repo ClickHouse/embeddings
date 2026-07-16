@@ -60,9 +60,9 @@ const S3 = 'https://multimedia-commons.s3.us-west-2.amazonaws.com/data/images';
 const TILE = 1024;                 /// tile pixel size
 const COORD_BITS = 32;             /// x,y live in [0, 2^32)
 const DATASETS = {
-    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152 },
-    clip:    { table: 'mmcommons.emb_clip',    dim: 768  },
-    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768  },
+    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152, q99: 378 },
+    clip:    { table: 'mmcommons.emb_clip',    dim: 768,  q99: 378 },  /// q99 measured for siglip2; re-measure clip/nomic when built
+    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  q99: 378 },
 };
 const REPRS = {           /// vector column used for cosine similarity in the report
     original: 'embedding',
@@ -91,23 +91,24 @@ function setStatus(t) { document.getElementById('status').textContent = t; }
 /// ---- Point-cloud tile query ----
 /// Table name comes from our own config, so it is interpolated (not a {:Identifier} param,
 /// which would wrap the dotted db.table in backticks as a single identifier).
-function tileSQL(table) {
+function tileSQL(table, q99) {
+    /// Fixed brightness normalization: expected q99 per-pixel density / 4^zoom (each 2x zoom
+    /// quarters the per-pixel area). q is a constant per tile -> brightness is consistent across
+    /// tiles and zoom levels (adsb-style), instead of a per-tile quantile.
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
+        ${q99} / pow(4, {z:UInt8}) AS q
     SELECT px, py,
         tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
     FROM (
-        SELECT px, py,
-            colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
+        SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
         FROM (
-            SELECT px, py, cnt, hue, quantile(0.99)(cnt) OVER () AS q FROM (
-                SELECT toUInt16(intDiv((x - tx0) * ${TILE}, ts)) AS px,
-                       toUInt16(intDiv((y - ty0) * ${TILE}, ts)) AS py,
-                       count() AS cnt, avg(z) / 65535 AS hue
-                FROM ${table}
-                WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
-                GROUP BY px, py
-            )
+            SELECT toUInt16(intDiv((x - tx0) * ${TILE}, ts)) AS px,
+                   toUInt16(intDiv((y - ty0) * ${TILE}, ts)) AS py,
+                   count() AS cnt, avg(z) / 65535 AS hue
+            FROM ${table}
+            WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
+            GROUP BY px, py
         )
     ) FORMAT RowBinary`;
 }
@@ -129,12 +130,12 @@ function thumbCellsSQL(table) {
 
 /// ---- Rendering ----
 async function renderTile(coords, canvas) {
-    const table = curTable();
+    const table = curTable(), q99 = DATASETS[dataset].q99;
     const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
     try {
-        if (mode === 'thumbs') { await renderThumbs(p, table, ctx); return; }
-        const buf = await (await chQuery(tileSQL(table), p)).arrayBuffer();
+        if (mode === 'thumbs') { await renderThumbs(p, table, q99, ctx); return; }
+        const buf = await (await chQuery(tileSQL(table, q99), p)).arrayBuffer();
         const dv = new DataView(buf);
         const img = ctx.createImageData(TILE, TILE);
         for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
@@ -147,9 +148,9 @@ async function renderTile(coords, canvas) {
         hideError();
     } catch (e) { showError(String(e).slice(0, 500)); }
 }
-async function renderThumbs(p, table, ctx) {
+async function renderThumbs(p, table, q99, ctx) {
     /// faint point cloud first, then thumbnails on top
-    const buf = await (await chQuery(tileSQL(table), p)).arrayBuffer();
+    const buf = await (await chQuery(tileSQL(table, q99), p)).arrayBuffer();
     const dv = new DataView(buf), img = ctx.createImageData(TILE, TILE);
     for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
         const px = dv.getUint16(o, true), py = dv.getUint16(o + 2, true), i = (py*TILE+px)*4;

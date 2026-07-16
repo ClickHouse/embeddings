@@ -20,8 +20,11 @@ ALTER TABLE mmcommons.emb_siglip2 MATERIALIZE COLUMN x, MATERIALIZE COLUMN y, MA
     SETTINGS mutations_sync = 0, allow_experimental_qbit_type = 1;
 
 -- 3) Projection sorted by the Z-order curve over (x,y) so 2-D tile range queries prune granules
---    (space-filling-curve index analysis). Stores only x,y,z.
-ALTER TABLE mmcommons.emb_siglip2 ADD PROJECTION proj_xy (SELECT x, y, z ORDER BY mortonEncode(x, y));
+--    (space-filling-curve index analysis). MUST include md5: the point-cloud tile aggregation uses
+--    x,y,z, but the nearest-point-for-report and thumbnail-per-cell lookups SELECT md5 while filtering
+--    x,y -- without md5 in the projection those fall back to the md5-ordered main table (full scan).
+--    With md5 in the projection they prune via morton (verified: 3 MiB / 355K rows vs full scan).
+ALTER TABLE mmcommons.emb_siglip2 ADD PROJECTION proj_xy (SELECT x, y, z, md5 ORDER BY mortonEncode(x, y));
 ALTER TABLE mmcommons.emb_siglip2 MATERIALIZE PROJECTION proj_xy
     SETTINGS mutations_sync = 0, allow_experimental_qbit_type = 1;
 
