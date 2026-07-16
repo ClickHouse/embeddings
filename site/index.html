@@ -22,6 +22,7 @@
     .topk-marker { background: none; border: 0; }
     .topk-marker img { box-sizing: border-box; display: block; image-rendering: pixelated;
         border: 1px solid rgba(255,213,79,.9); box-shadow: 0 0 5px #000; cursor: pointer; }
+    .topk-marker img.loading { width: 0 !important; height: 0 !important; border: 0 !important; box-shadow: none !important; }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
@@ -277,8 +278,9 @@ const MAX_THUMB = 75, MIN_THUMB = 12;
 /// inverse of latlngToData: data coords (0..2^32) -> CRS.Simple latlng
 function dataToLatLng(x, y) { const s = Math.pow(2, COORD_BITS) / TILE; return map.unproject([x / s, y / s], 0); }
 function overlayIcon(md5, size) {
+    /// start hidden (class 'loading' -> 0x0, no border); reveal onload so loading imgs don't show a border sliver
     return L.divIcon({ className: 'topk-marker',
-        html: `<img src="${thumbURL(md5)}" draggable="false" style="width:${size}px;height:${size}px">`,
+        html: `<img src="${thumbURL(md5)}" draggable="false" class="loading" onload="this.classList.remove('loading')" style="width:${size}px;height:${size}px">`,
         iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 function clearOverlay() { topkLayer.clearLayers(); overlayPts = []; }
