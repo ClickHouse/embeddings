@@ -8,6 +8,18 @@ ALTER TABLE mmcommons.emb_siglip2
     ADD COLUMN embedding_rotated QBit(BFloat16, 2048, 128)
         DEFAULT randomHadamardTransform(CAST(embedding, 'Array(BFloat16)'));   -- needs allow_experimental_qbit_type=1
 
+-- 1b) Additional QBit representations for the vector-representation switcher (strided BFloat16, and
+--     Int8-quantized of both the original and the rotated). Dims are padded to the next power of two
+--     (1152 -> 2048 for the original, 2048 -> 4096 for the rotated). Int8 columns use CODEC(NONE).
+ALTER TABLE mmcommons.emb_siglip2
+    ADD COLUMN `embedding_strided`     QBit(BFloat16, 2048, 128) DEFAULT CAST(embedding, 'Array(BFloat16)'),
+    ADD COLUMN `embedding_int`         QBit(Int8, 2048, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
+    ADD COLUMN `embedding_rotated_int` QBit(Int8, 4096, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE);
+ALTER TABLE mmcommons.emb_siglip2
+    MATERIALIZE COLUMN `embedding_strided`,
+    MATERIALIZE COLUMN `embedding_int`,
+    MATERIALIZE COLUMN `embedding_rotated_int`;
+
 -- 2) 2-D projection + hue as MATERIALIZED columns. Range = mean ± n*sigma (precomputed constants,
 --    n_xy = 2.5 ≈ q01/q99, n_z = 0.7 ≈ q25/q75) so no window functions are needed at read time.
 --    siglip2 constants: xf μ -0.116 σ 0.291 ; yf μ 0.048 σ 0.299 ; zf μ 0.011 σ 0.231.
