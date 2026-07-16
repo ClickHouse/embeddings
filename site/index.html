@@ -599,16 +599,18 @@ function layoutForReport(open) {
     map.invalidateSize();
 }
 /// Size the panel to a whole number of thumbnail columns (no leftover gutter on the right),
-/// and match the map's right edge to it. Recomputed on open and on window resize.
+/// and match the map's right edge to it. Measure-and-trim: reset to the CSS max, measure the
+/// actual leftover after auto-fill, then trim exactly that (handles scrollbar + sub-pixel rounding).
 function fitPanelWidth() {
     const report = document.getElementById('report'), grid = document.getElementById('grid');
     if (!grid) return;
+    report.style.width = ''; report.style.maxWidth = '';   /// back to CSS (40% / 640px) to measure
     const CELL = 75, GAP = 3, cs = getComputedStyle(grid);
     const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
-    const sb = report.offsetWidth - report.clientWidth;   /// reserved scrollbar gutter (scrollbar-gutter: stable)
-    const maxContent = Math.min(window.innerWidth * 0.40, 640) - padX - sb;
-    const cols = Math.max(1, Math.floor((maxContent + GAP) / (CELL + GAP)));
-    const w = cols * CELL + (cols - 1) * GAP + padX + sb;
+    const content = grid.clientWidth - padX;               /// actual grid content width at the max
+    const cols = Math.max(1, Math.floor((content + GAP) / (CELL + GAP)));
+    const leftover = content - (cols * CELL + (cols - 1) * GAP);
+    const w = report.offsetWidth - Math.floor(leftover);   /// floor keeps all cols (leaves <1px, never drops one)
     report.style.maxWidth = 'none'; report.style.width = w + 'px';
     if (reportActive) { document.getElementById('map').style.right = w + 'px'; map.invalidateSize(); }
 }
