@@ -354,8 +354,11 @@ async function runSimilar() {
             WHERE md5 != {md5:String}
             ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC
             LIMIT 100 FORMAT JSONEachRowWithProgress`;
-        /// stream the response (NO wait_end_of_query) so progress events arrive live during the scan
-        const url = chURL(`replace_running_query=1` +
+        /// stream the response (NO wait_end_of_query) so progress events arrive live during the scan.
+        /// BFloat16 cosineDistanceTransposed + a scalar-subquery arg + parallel replicas hits a CH bug
+        /// (NOT_FOUND_COLUMN_IN_BLOCK at result assembly), so disable parallel replicas for it; Int8 is fine.
+        const noPR = rep.type === 'BFloat16' ? '&enable_parallel_replicas=0' : '';
+        const url = chURL(`replace_running_query=1${noPR}` +
             `&param_md5=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}`);
         const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
         if (!resp.ok) throw new Error(await resp.text());
