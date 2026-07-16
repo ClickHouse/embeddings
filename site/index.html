@@ -85,7 +85,8 @@ let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
 let curReport = null;                                       /// md5 of the open report
 let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
-let rep = { type: 'BFloat16', rot: 'original', bits: 8, dims: 1152 };   /// report similarity config
+/// report similarity config — default: Int8, rotated, original #dims (1152 for siglip2)
+let rep = { type: 'Int8', rot: 'rotated', bits: 8, dims: DATASETS[dataset].dim };
 const curTable = () => DATASETS[dataset].table;
 const qbitInfo = () => QBIT[`${rep.type}|${rep.rot}`];
 const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
