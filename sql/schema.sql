@@ -9,12 +9,12 @@ ALTER TABLE mmcommons.emb_siglip2
         DEFAULT randomHadamardTransform(CAST(embedding, 'Array(BFloat16)'));   -- needs allow_experimental_qbit_type=1
 
 -- 1b) Additional QBit representations for the vector-representation switcher (strided BFloat16, and
---     Int8-quantized of both the original and the rotated). Dims are padded to the next power of two
---     (1152 -> 2048 for the original, 2048 -> 4096 for the rotated). Int8 columns use CODEC(NONE).
+--     Int8-quantized of both the original and the rotated). QBit dim = source vector length
+--     (1152 for the original embedding, 2048 for the rotated). Int8 columns use CODEC(NONE).
 ALTER TABLE mmcommons.emb_siglip2
-    ADD COLUMN `embedding_strided`     QBit(BFloat16, 2048, 128) DEFAULT CAST(embedding, 'Array(BFloat16)'),
-    ADD COLUMN `embedding_int`         QBit(Int8, 2048, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
-    ADD COLUMN `embedding_rotated_int` QBit(Int8, 4096, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE);
+    ADD COLUMN `embedding_strided`     QBit(BFloat16, 1152, 128) DEFAULT CAST(embedding, 'Array(BFloat16)'),
+    ADD COLUMN `embedding_int`         QBit(Int8, 1152, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
+    ADD COLUMN `embedding_rotated_int` QBit(Int8, 2048, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE);
 ALTER TABLE mmcommons.emb_siglip2
     MATERIALIZE COLUMN `embedding_strided`,
     MATERIALIZE COLUMN `embedding_int`,
