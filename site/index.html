@@ -116,8 +116,8 @@ let repLoaded = 0;      /// # of result images currently shown
 let repLoading = false; /// a scan is in flight (guards scroll-triggered load-more)
 let repMore = true;     /// more results may exist (the last batch was full)
 const MAX_RESULTS = 3000;   /// safety cap on rendered thumbnails
-/// report similarity config — default: Int8, rotated, original #dims (1152 for siglip2)
-let rep = { type: 'Int8', rot: 'rotated', bits: 8, dims: DATASETS[dataset].dim };
+/// report similarity config — default: Int8, rotated, 1 bit, 128 dims (fast, coarse first pass)
+let rep = { type: 'Int8', rot: 'rotated', bits: 1, dims: 128 };
 const curTable = () => DATASETS[dataset].table;
 /// QBit dim is dataset-aware: rotated cols use the dataset's rotated dim (rdim), others its original dim.
 const qbitInfo = () => { const q = QBIT[`${rep.type}|${rep.rot}`], d = DATASETS[dataset]; return { col: q.col, dim: q.rot ? d.rdim : d.dim }; };
