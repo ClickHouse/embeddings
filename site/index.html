@@ -343,11 +343,10 @@ async function runSimilar() {
         const s = JSON.parse(resp.headers.get('X-ClickHouse-Summary') || '{}');
         const secs = (+s.elapsed_ns || 0) / 1e9, rr = +s.read_rows || 0, rb = +s.read_bytes || 0;
         const rows = text ? text.split('\n').filter(Boolean) : [];
-        /// build the new grid off-DOM (query thumbnail first, then results), preload, then swap in one shot
+        /// swap in the new grid as soon as the query returns (old pictures stay dimmed only during
+        /// the slow query); each thumbnail then appears on its own as it loads, not all at once
         const next = [thumbImg(md5, true)];
         for (const m of rows) next.push(thumbImg(m, false));
-        await preloadImgs(next);
-        if (seq !== repSeq) return;                          /// superseded while preloading thumbnails
         grid.replaceChildren(...next);
         grid.classList.remove('loading');
         stats.innerHTML = `top-${rows.length} in <b>${secs.toFixed(3)} s</b> · ${fmtNum(rr / secs)} rows/s · ` +
@@ -376,14 +375,6 @@ function previewImg(md5) {
     document.getElementById('full').style.display = 'block';
 }
 function hidePreview() { document.getElementById('full').style.display = 'none'; }
-/// resolve once every image has loaded (or errored), with a safety timeout so one slow thumb can't hang the swap
-function preloadImgs(imgs, ms = 8000) {
-    return Promise.race([
-        Promise.all(imgs.map(im => im.complete && im.naturalWidth ? null
-            : new Promise(res => { im.onload = im.onerror = res; }))),
-        new Promise(res => setTimeout(res, ms)),
-    ]);
-}
 function hideReport() { document.getElementById('report').style.display = 'none'; hidePreview(); }
 
 /// ---- Switchers ----
