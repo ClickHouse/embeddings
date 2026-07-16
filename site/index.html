@@ -103,6 +103,11 @@ let mode = 'points';      /// 'points' | 'thumbs'
 let curReport = null;                                       /// md5 of the open report
 let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
 let repAbort = null;                                        /// aborts a still-running scan when switching
+let repTarget = 0;      /// desired # of result images (grows 2x on scroll)
+let repLoaded = 0;      /// # of result images currently shown
+let repLoading = false; /// a scan is in flight (guards scroll-triggered load-more)
+let repMore = true;     /// more results may exist (the last batch was full)
+const MAX_RESULTS = 3000;   /// safety cap on rendered thumbnails
 /// report similarity config — default: Int8, rotated, original #dims (1152 for siglip2)
 let rep = { type: 'Int8', rot: 'rotated', bits: 8, dims: DATASETS[dataset].dim };
 const curTable = () => DATASETS[dataset].table;
@@ -267,6 +272,8 @@ function latlngToData(latlng) {
 
 /// ---- Click -> nearest point -> report ----
 map.on('click', async (e) => {
+    /// point-cloud: if the hover thumbnail is showing, target exactly that image (what the user sees)
+    if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }
     const table = curTable();
     const d = latlngToData(e.latlng);
     setStatus('finding point…');
@@ -302,8 +309,8 @@ map.on('click', async (e) => {
 });
 
 /// ---- Point-cloud hover: after the mouse rests ~100ms, show the nearest image's thumbnail ----
-let hoverTimer = null, hoverSeq = 0;
-function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } document.getElementById('hover').style.display = 'none'; }
+let hoverTimer = null, hoverSeq = 0, hoverMd5 = null;
+function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null; document.getElementById('hover').style.display = 'none'; }
 map.on('mousemove', (e) => {
     hideHover();                                             /// moving -> hide, restart the dwell timer
     if (mode !== 'points') return;
@@ -324,6 +331,7 @@ async function hoverPreview(latlng, cp) {
         const url = chURL(`default_format=TSV&param_cx=${d.x}&param_cy=${d.y}&param_r=${r}`, USER_THUMBS);
         const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
         if (seq !== hoverSeq || mode !== 'points' || !md5) return;   /// mouse moved / mode switched / nothing near
+        hoverMd5 = md5;                                          /// remember it so a click targets exactly the shown image
         const h = document.getElementById('hover');
         h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = md5;
         h.onload = () => { if (seq === hoverSeq && mode === 'points') h.style.display = 'block'; };
@@ -344,11 +352,21 @@ function showReport(md5) {
     document.getElementById('rc-query').innerHTML =
         `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
     buildRepScales();
-    runSimilar();
+    repTarget = pages15();                                   /// new target/dataset -> reset to ~1.5 pages
+    runSimilar(false);
+}
+/// how many result thumbnails fill ~1.5 panel pages (the initial load size)
+function pages15() {
+    const grid = document.getElementById('grid'), rep = document.getElementById('report');
+    const cell = 78;   /// 75px thumbnail + 3px gap
+    const cols = Math.max(1, Math.floor((grid.clientWidth + 3) / cell));
+    const gridTop = grid.getBoundingClientRect().top - rep.getBoundingClientRect().top;
+    const rows = Math.max(2, Math.floor((rep.clientHeight - gridTop) / cell));
+    return Math.min(MAX_RESULTS, Math.ceil(cols * rows * 1.5));
 }
 function buildReportShell() {
     document.getElementById('report-body').innerHTML =
-        `<h3>Top-100 similar</h3>
+        `<h3 id="rc-title">Top-100 similar</h3>
          <div>query: <span id="rc-query"></span></div>
          <div class="repctl">
            <div><label>type</label><span id="rc-type"></span></div>
@@ -373,38 +391,43 @@ function switchRep() {
     rep.bits = Math.min(rep.bits, repMaxBits());
     rep.dims = Math.min(rep.dims, repMaxDims());
     buildRepScales();
-    runSimilar();
+    runSimilar(false);   /// rebuild at the current target count (keep the scrolled-in amount)
 }
-async function runSimilar() {
+/// Run the similarity scan. more=false rebuilds the grid to the top-`repTarget`; more=true appends
+/// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
+async function runSimilar(more) {
     const table = curTable(), col = qbitInfo().col, md5 = curReport;
     /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
     const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
     const grid = document.getElementById('grid'), stats = document.getElementById('rep-stats');
     const bar = document.getElementById('rep-progress'), barFill = bar.firstElementChild;
+    const off = more ? repLoaded : 0, cnt = (more ? repTarget - repLoaded : repTarget);
+    if (cnt <= 0) return;
     const seq = ++repSeq;
+    repLoading = true;
     if (repAbort) repAbort.abort();                          /// cancel a still-running previous scan
     const ac = repAbort = new AbortController();
-    /// first open: show the query thumbnail immediately (nothing to compare against yet);
-    /// on a switch/re-target keep the current pictures but dim them to 50% until the new result loads
-    if (grid.children.length) grid.classList.add('loading');
-    else grid.replaceChildren(thumbImg(md5, true));
+    if (!more) {
+        /// first open: show the query thumbnail immediately; a switch keeps the old pictures dimmed until loaded
+        if (grid.children.length) grid.classList.add('loading');
+        else grid.replaceChildren(thumbImg(md5, true));
+    }
     bar.style.display = 'block'; barFill.style.width = '0%';
-    stats.textContent = `running: ${col} · ${rep.bits} bits · ${rep.dims} dims…`;
-    setStatus(`top-100: ${col} · ${rep.bits}b · ${rep.dims}d…`);
+    stats.textContent = more ? 'loading more…' : `running: ${col} · ${rep.bits} bits · ${rep.dims} dims…`;
+    setStatus(more ? 'loading more…' : `top: ${col} · ${rep.bits}b · ${rep.dims}d…`);
     try {
         const total = await tableRows(table);               /// bar denominator (progress.total_rows_to_read is unreliable w/ parallel replicas)
         if (seq !== repSeq) return;
+        /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS q
             SELECT md5 FROM ${table}
             WHERE md5 != {md5:String}
-            ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC
-            LIMIT 100 FORMAT JSONEachRowWithProgress`;
-        /// stream the response (NO wait_end_of_query) so progress events arrive live during the scan.
-        /// BFloat16 cosineDistanceTransposed + a scalar-subquery arg + parallel replicas hits a CH bug
-        /// (NOT_FOUND_COLUMN_IN_BLOCK at result assembly), so disable parallel replicas for it; Int8 is fine.
+            ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC, md5 ASC
+            LIMIT {off:UInt32}, {cnt:UInt32} FORMAT JSONEachRowWithProgress`;
+        /// BFloat16 cosineDistanceTransposed + scalar arg + parallel replicas hits a CH bug -> disable PR for it; Int8 ok
         const noPR = rep.type === 'BFloat16' ? '&enable_parallel_replicas=0' : '';
         const url = chURL(`replace_running_query=1${noPR}` +
-            `&param_md5=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}`);
+            `&param_md5=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`);
         const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
         if (!resp.ok) throw new Error(await resp.text());
         const reader = resp.body.getReader(), decoder = new TextDecoder();
@@ -420,10 +443,9 @@ async function runSimilar() {
                 const o = JSON.parse(line);
                 if (o.progress) {
                     prog = o.progress;
-                    const rr = +prog.read_rows || 0, secs = (+prog.elapsed_ns || 0) / 1e9, rb = +prog.read_bytes || 0;
+                    const rr = +prog.read_rows || 0;
                     barFill.style.width = (total ? Math.min(rr / total, 1) * 100 : 0).toFixed(1) + '%';
-                    stats.innerHTML = `scanned ${fmtNum(rr)} / ${fmtNum(total)} rows · ${fmtBytes(rb)} · ` +
-                        `${fmtNum(secs ? rr / secs : 0)} rows/s · ${fmtBytes(secs ? rb / secs : 0)}/s`;
+                    stats.textContent = `${more ? 'loading more' : 'scanning'}: ${fmtNum(rr)} / ${fmtNum(total)} rows`;
                 } else if (o.row) {
                     rows.push(o.row.md5);
                 } else if (o.exception) {
@@ -431,22 +453,31 @@ async function runSimilar() {
                 }
             }
         }
-        if (seq !== repSeq) return;                          /// a newer switch superseded this run
+        if (seq !== repSeq) return;                          /// a newer switch superseded this run (it owns repLoading)
         bar.style.display = 'none';
-        /// swap in the new grid; each thumbnail then appears on its own as it loads, not all at once
-        const next = [thumbImg(md5, true)];
-        for (const m of rows) next.push(thumbImg(m, false));
-        grid.replaceChildren(...next);
-        grid.classList.remove('loading');
-        hideError();                                         /// clear any stale error after a successful load
+        if (more) {
+            for (const m of rows) grid.appendChild(thumbImg(m, false));   /// append the next page (keeps scroll position)
+            repLoaded += rows.length;
+        } else {
+            const next = [thumbImg(md5, true)];                            /// rebuild: query thumb + results
+            for (const m of rows) next.push(thumbImg(m, false));
+            grid.replaceChildren(...next);
+            grid.classList.remove('loading');
+            repLoaded = rows.length;
+        }
+        repMore = rows.length === cnt && repLoaded < MAX_RESULTS;          /// full batch -> more may exist
+        hideError();
+        document.getElementById('rc-title').textContent = `Top-${repLoaded} similar`;
         const secs = (+(prog && prog.elapsed_ns) || 0) / 1e9, rr = +(prog && prog.read_rows) || 0, rb = +(prog && prog.read_bytes) || 0;
-        stats.innerHTML = `top-${rows.length} in <b>${secs.toFixed(3)} s</b> · ${fmtNum(secs ? rr / secs : 0)} rows/s · ` +
-            `${fmtBytes(secs ? rb / secs : 0)}/s · scanned ${fmtNum(rr)} rows, ${fmtBytes(rb)}`;
-        setStatus(`report: ${rows.length} · ${secs.toFixed(2)}s · ${fmtBytes(rb)}`);
+        stats.innerHTML = `${repLoaded} shown · <b>${secs.toFixed(2)} s</b> · ${fmtNum(secs ? rr / secs : 0)} rows/s · ` +
+            `${fmtBytes(secs ? rb / secs : 0)}/s · scanned ${fmtNum(rr)} rows`;
+        setStatus(`report: ${repLoaded} · ${secs.toFixed(2)}s`);
+        repLoading = false;
     } catch (err) {
-        if (seq !== repSeq) return;                          /// superseded/aborted -> ignore
+        if (seq !== repSeq) return;                          /// superseded/aborted -> a newer run owns repLoading
         bar.style.display = 'none';
         grid.classList.remove('loading');                   /// restore brightness of the kept pictures
+        repLoading = false;
         const msg = String(err);
         if (/INCORRECT_RESULT_OF_SCALAR_SUBQUERY|empty result/i.test(msg)) {
             hideError();                                     /// target md5 not embedded in this dataset (datasets differ)
@@ -457,6 +488,13 @@ async function runSimilar() {
         }
     }
 }
+/// infinite scroll: near the bottom of the panel, request 2x more results
+document.getElementById('report').addEventListener('scroll', function () {
+    if (repLoading || !repMore || !curReport) return;
+    if (this.scrollTop + this.clientHeight < this.scrollHeight - 300) return;
+    repTarget = Math.min(repLoaded * 2, MAX_RESULTS);
+    if (repTarget > repLoaded) runSimilar(true);
+});
 /// One grid thumbnail: hover shows the full-size preview; clicking a result re-targets the search.
 function thumbImg(md5, isQuery) {
     const img = document.createElement('img');
