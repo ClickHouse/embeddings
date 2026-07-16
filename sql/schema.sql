@@ -47,8 +47,12 @@ ALTER TABLE mmcommons.emb_siglip2 ADD PROJECTION proj_xy (SELECT x, y, z, md5 OR
 ALTER TABLE mmcommons.emb_siglip2 MATERIALIZE PROJECTION proj_xy
     SETTINGS mutations_sync = 0, allow_experimental_qbit_type = 1;
 
--- 4) Public read-only user for the browser (adsb.exposed model). CORS is enabled globally on the service.
+-- 4) Public read-only users for the browser (adsb.exposed model). CORS is enabled globally on the service.
 --    Cloud disallows no_password, so a public (in-JS) password is used; security is the read-only grant + caps.
+--    TWO users sharing the SAME password, so the many small thumbnail loads don't compete with (or count
+--    against the limits of) the heavy analytical queries:
+--      * website        - heavy queries: point-cloud/thumbnail tiles, top-100 similarity search, click lookups.
+--      * website_thumbs - point queries: per-md5 thumbnail PNG loads (query cache on, few threads, tight caps).
 CREATE USER IF NOT EXISTS website IDENTIFIED WITH sha256_password BY 'Embeddings-Viewer-2026!';
 GRANT SELECT ON mmcommons.* TO website;
 ALTER USER website SETTINGS
@@ -57,6 +61,16 @@ ALTER USER website SETTINGS
     max_execution_time = 60 MAX 300,
     max_memory_usage = 6000000000 MAX 12000000000,
     max_result_rows = 5000000 MAX 20000000,
+    readonly = 2;
+
+CREATE USER IF NOT EXISTS website_thumbs IDENTIFIED WITH sha256_password BY 'Embeddings-Viewer-2026!';
+GRANT SELECT ON mmcommons.* TO website_thumbs;
+ALTER USER website_thumbs SETTINGS
+    use_query_cache = 1,                 -- thumbnails repeat a lot -> query cache is a big win
+    max_execution_time = 10 MAX 30,
+    max_memory_usage = 2000000000 MAX 4000000000,
+    max_result_rows = 100000 MAX 1000000,
+    max_threads = 2,                     -- point queries don't need parallelism; leave cores for `website`
     readonly = 2;
 
 -- Tile query (point cloud), parameterized by {z,x,y,table}; returns sparse (px,py,r,g,b) RowBinary.
