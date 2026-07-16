@@ -14,6 +14,10 @@
     body.report-open #map { right: min(40%, 640px); }
     /* keep Leaflet's top controls (zoom) clear of the top header bar; JS refines to exact panel height */
     .leaflet-top { margin-top: 42px; }
+    /* point-cloud hover: nearest-image thumbnail shown under the cursor after a short dwell */
+    #hover { position: absolute; width: 75px; height: 75px; z-index: 1001; pointer-events: none;
+        display: none; image-rendering: pixelated; border: 2px solid #ffd54f; background: #222;
+        box-shadow: 0 0 12px #000; }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
@@ -66,6 +70,8 @@
 </div>
 <div id="report"><span class="close" onclick="hideReport()">✕</span><div id="report-body"></div></div>
 <div id="full"><img id="full-img"></div>
+<img id="hover">
+
 <div id="error"></div>
 <script>
 /// ---- Config ----
@@ -295,6 +301,37 @@ map.on('click', async (e) => {
     } catch (err) { showError(String(err).slice(0, 500)); }
 });
 
+/// ---- Point-cloud hover: after the mouse rests ~100ms, show the nearest image's thumbnail ----
+let hoverTimer = null, hoverSeq = 0;
+function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } document.getElementById('hover').style.display = 'none'; }
+map.on('mousemove', (e) => {
+    hideHover();                                             /// moving -> hide, restart the dwell timer
+    if (mode !== 'points') return;
+    const ll = e.latlng, cp = e.containerPoint;
+    hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);
+});
+map.on('mouseout movestart zoomstart', hideHover);
+async function hoverPreview(latlng, cp) {
+    if (mode !== 'points') return;
+    const seq = ++hoverSeq, d = latlngToData(latlng);
+    const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE, r = Math.max(1, Math.round(px * 6));
+    /// nearest point via the morton projection; routed to website_thumbs (point-query user) not to compete with reports
+    const sql = `SELECT md5 FROM ${curTable()}
+        WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
+          AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
+        ORDER BY pow(toInt64(x) - toInt64({cx:UInt32}), 2) + pow(toInt64(y) - toInt64({cy:UInt32}), 2) ASC LIMIT 1 FORMAT TSV`;
+    try {
+        const url = chURL(`default_format=TSV&param_cx=${d.x}&param_cy=${d.y}&param_r=${r}`, USER_THUMBS);
+        const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
+        if (seq !== hoverSeq || mode !== 'points' || !md5) return;   /// mouse moved / mode switched / nothing near
+        const h = document.getElementById('hover');
+        h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = md5;
+        h.onload = () => { if (seq === hoverSeq && mode === 'points') h.style.display = 'block'; };
+        h.src = thumbURL(md5);
+        if (h.complete && h.naturalWidth) h.style.display = 'block';
+    } catch (e) { /* ignore transient hover errors */ }
+}
+
 /// Open (or re-target) the report. First open builds the shell; later calls keep the grid
 /// so the old pictures stay (dimmed) until the new result loads.
 function showReport(md5) {
@@ -457,7 +494,7 @@ buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset
     if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
 });
-buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; redraw(); });
+buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; hideHover(); redraw(); });
 
 /// offset the Leaflet top controls below the (variable-height, wrappable) header bar
 function offsetControls() {
