@@ -8,6 +8,13 @@ ALTER TABLE mmcommons.emb_siglip2
     ADD COLUMN embedding_rotated QBit(BFloat16, 2048, 128)
         DEFAULT randomHadamardTransform(CAST(embedding, 'Array(BFloat16)'));   -- needs allow_experimental_qbit_type=1
 
+-- IMPORTANT: this column MUST be materialized (not left as a computed DEFAULT). The transposed distance
+-- functions (cosineDistanceTransposed/...Quantized) cannot recompute a QBit DEFAULT on read — they read
+-- the source column as empty and fail with Code 190 "must have size N, got 0" (ClickHouse#110634). A plain
+-- MATERIALIZE COLUMN of x/y/z reads embedding_rotated on the fly but does NOT store it, so do this too:
+ALTER TABLE mmcommons.emb_siglip2 MATERIALIZE COLUMN embedding_rotated
+    SETTINGS mutations_sync = 0, allow_experimental_qbit_type = 1;
+
 -- 1b) Additional QBit representations for the vector-representation switcher (strided BFloat16, and
 --     Int8-quantized of both the original and the rotated). QBit dim = source vector length
 --     (1152 for the original embedding, 2048 for the rotated). Int8 columns use CODEC(NONE).
