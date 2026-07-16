@@ -30,14 +30,14 @@
     #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
         border: 1px solid #333; background: #222; transition: filter .15s; }
     #grid img:hover { border-color: #ffd54f; }
-    /// while a new representation loads, keep the old pictures but dim them to 50% for visual diff
+    /* while a new representation loads, keep the old pictures but dim them to 50% for visual diff */
     #grid.loading img { filter: brightness(.5); }
     .repctl { display: flex; flex-wrap: wrap; gap: .3em 1.2em; margin: .5em 0; align-items: center; }
     .repctl > div { display: flex; align-items: center; gap: .25em; }
     .repctl label { color: #999; font-size: 11px; }
     .repctl .opt { padding: .12em .4em; font-size: 11px; }
     .repstats { font-family: monospace; font-size: 12px; color: #8bc34a; margin: .2em 0 .5em; }
-    /// non-modal full-size preview shown on hover, pinned to the bottom-left corner
+    /* non-modal full-size preview shown on hover, pinned to the bottom-left corner */
     #full { position: absolute; left: 10px; bottom: 10px; z-index: 1003;
         display: none; pointer-events: none; }
     #full img { max-width: 42vw; max-height: 66vh; box-shadow: 0 0 40px #000;
