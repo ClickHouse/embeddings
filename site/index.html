@@ -227,7 +227,7 @@ map.on('click', async (e) => {
         const sql = `SELECT md5 FROM ${table}
             WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
               AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
-            ORDER BY (toInt64(x)-toInt64({cx:UInt32}))^2 + (toInt64(y)-toInt64({cy:UInt32}))^2 ASC
+            ORDER BY pow(toInt64(x) - toInt64({cx:UInt32}), 2) + pow(toInt64(y) - toInt64({cy:UInt32}), 2) ASC
             LIMIT 1 FORMAT TSV`;
         const md5 = (await (await chQuery(sql, { cx: d.x, cy: d.y, r })).text()).trim();
         if (md5) showReport(md5); else setStatus('no point near click');
