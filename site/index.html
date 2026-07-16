@@ -30,6 +30,10 @@
     #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
         border: 1px solid #333; background: #222; }
     #grid img:hover { border-color: #ffd54f; }
+    .repctl { display: flex; flex-wrap: wrap; gap: .3em 1.2em; margin: .5em 0; align-items: center; }
+    .repctl > div { display: flex; align-items: center; gap: .25em; }
+    .repctl label { color: #999; font-size: 11px; }
+    .repctl .opt { padding: .12em .4em; font-size: 11px; }
     #full { position: absolute; inset: 0; z-index: 1003; background: rgba(0,0,0,.92);
         display: none; align-items: center; justify-content: center; cursor: zoom-out; }
     #full img { max-width: 92%; max-height: 92%; box-shadow: 0 0 40px #000; }
@@ -44,7 +48,6 @@
     <b>Embeddings Explorer</b>
     <div class="grp"><label>dataset</label><span id="datasets"></span></div>
     <div class="grp"><label>mode</label><span id="modes"></span></div>
-    <div class="grp"><label>vectors</label><span id="reprs"></span></div>
     <span id="status">ready</span>
 </div>
 <div id="report"><span class="close" onclick="hideReport()">✕</span><div id="report-body"></div></div>
@@ -64,14 +67,22 @@ const DATASETS = {
     clip:    { table: 'mmcommons.emb_clip',    dim: 768,  q99: 378 },  /// q99 measured for siglip2; re-measure clip/nomic when built
     nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  q99: 378 },
 };
-const REPRS = {           /// vector column used for cosine similarity in the report
-    original: 'embedding',
-    rotated:  'embedding_rotated',
+/// The 4 QBit representation columns (type x rotation) + their full dimension. Report similarity
+/// uses ONLY these QBit columns via cosineDistanceTransposed(qbit, ref[dims], bits, dims).
+const QBIT = {
+    'BFloat16|original': { col: 'embedding_strided',     dim: 1152 },
+    'BFloat16|rotated':  { col: 'embedding_rotated',     dim: 2048 },
+    'Int8|original':     { col: 'embedding_int',         dim: 1152 },
+    'Int8|rotated':      { col: 'embedding_rotated_int', dim: 2048 },
 };
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
-let repr = 'original';
+let curReport = null;                                       /// md5 of the open report
+let rep = { type: 'BFloat16', rot: 'original', bits: 8, dims: 1152 };   /// report similarity config
 const curTable = () => DATASETS[dataset].table;
+const qbitInfo = () => QBIT[`${rep.type}|${rep.rot}`];
+const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
+const repMaxDims = () => qbitInfo().dim;
 
 /// ---- ClickHouse HTTP ----
 function chURL(extra) {
@@ -254,28 +265,51 @@ map.on('click', async (e) => {
 });
 
 async function showReport(md5) {
-    const table = curTable(), col = REPRS[repr] || 'embedding';
-    setStatus('computing top-100 similar…');
-    const body = document.getElementById('report-body');
-    body.innerHTML = `<h3>Top-100 similar</h3><div>query: <a href="${fullURL(md5)}" target=_blank>${md5}</a>
-        · ${dataset} · cosine over <b>${col}</b></div><div id="grid"></div>`;
+    curReport = md5;
+    rep.bits = Math.min(rep.bits, repMaxBits());   /// clamp to current type/rotation
+    rep.dims = Math.min(rep.dims, repMaxDims());
     document.getElementById('report').style.display = 'block';
+    renderReportControls();
+    await runSimilar();
+}
+function renderReportControls() {
+    document.getElementById('report-body').innerHTML =
+        `<h3>Top-100 similar</h3>
+         <div>query: <a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}</div>
+         <div class="repctl">
+           <div><label>type</label><span id="rc-type"></span></div>
+           <div><label>rotation</label><span id="rc-rot"></span></div>
+           <div><label>bits</label><span id="rc-bits"></span></div>
+           <div><label>dims</label><span id="rc-dims"></span></div>
+         </div>
+         <div id="grid"></div>`;
+    buildSwitch('rc-type', ['BFloat16', 'Int8'],     rep.type, v => { rep.type = v; showReport(curReport); });
+    buildSwitch('rc-rot',  ['original', 'rotated'],  rep.rot,  v => { rep.rot  = v; showReport(curReport); });
+    buildSwitch('rc-bits', Array.from({length: repMaxBits()}, (_, i) => i + 1), rep.bits, v => { rep.bits = +v; showReport(curReport); });
+    const dims = []; for (let d = 128; d <= repMaxDims(); d += 128) dims.push(d);
+    buildSwitch('rc-dims', dims, rep.dims, v => { rep.dims = +v; showReport(curReport); });
+}
+async function runSimilar() {
+    const table = curTable(), col = qbitInfo().col, md5 = curReport;
+    /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
+    const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
     const grid = document.getElementById('grid');
     grid.innerHTML = `<img src="${thumbURL(md5)}" title="query" style="border-color:#ffd54f">`;
+    setStatus(`top-100: ${col} · ${rep.bits} bits · ${rep.dims} dims…`);
     try {
-        const sql = `WITH (SELECT ${col} FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS target
+        const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS q
             SELECT md5 FROM ${table}
             WHERE md5 != {md5:String}
-            ORDER BY cosineDistance(${col}, target) ASC
+            ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC
             LIMIT 100 FORMAT TSV`;
-        const rows = (await (await chQuery(sql, { md5 })).text()).trim().split('\n').filter(Boolean);
+        const rows = (await (await chQuery(sql, { md5, bits: rep.bits, dims: rep.dims })).text()).trim().split('\n').filter(Boolean);
         for (const m of rows) {
             const img = document.createElement('img');
             img.src = thumbURL(m); img.title = m;
             img.onclick = () => showFull(m);
             grid.appendChild(img);
         }
-        setStatus(`report: ${rows.length} results`);
+        setStatus(`report: ${rows.length} · ${col} · ${rep.bits}b · ${rep.dims}d`);
     } catch (err) { showError(String(err).slice(0, 500)); }
 }
 function showFull(md5) {
@@ -296,7 +330,6 @@ function buildSwitch(elemId, keys, current, onPick) {
 }
 buildSwitch('datasets', Object.keys(DATASETS), dataset, k => { dataset = k; makeLayer(); });
 buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; redraw(); });
-buildSwitch('reprs', Object.keys(REPRS), repr, k => { repr = k; });
 
 makeLayer();
 </script>
