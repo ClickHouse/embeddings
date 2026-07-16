@@ -418,6 +418,7 @@ function showReport(md5) {
         repTarget = pages15();
     }
     runSimilar(false);
+    updateURL();
 }
 /// how many result thumbnails fill ~1.5 panel pages (the initial load size)
 function pages15() {
@@ -461,6 +462,7 @@ function switchRep() {
     document.getElementById('report').scrollTop = 0;   /// any switch -> back to top with the initial top-K
     repTarget = pages15();
     runSimilar(false);
+    updateURL();
 }
 /// Run the similarity scan. more=false rebuilds the grid to the top-`repTarget`; more=true appends
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
@@ -512,9 +514,9 @@ async function runSimilar(more) {
                 const o = JSON.parse(line);
                 if (o.progress) {
                     prog = o.progress;
-                    const rr = +prog.read_rows || 0;
+                    const rr = +prog.read_rows || 0, rb = +prog.read_bytes || 0, secs = (+prog.elapsed_ns || 0) / 1e9;
                     barFill.style.width = (total ? Math.min(rr / total, 1) * 100 : 0).toFixed(1) + '%';
-                    stats.textContent = `${more ? 'loading more' : 'scanning'}: ${fmtNum(rr)} / ${fmtNum(total)} rows`;
+                    stats.textContent = `${more ? 'loading more' : 'scanning'}: ${fmtNum(rr)} / ${fmtNum(total)} rows · ${fmtBytes(secs ? rb / secs : 0)}/s`;
                 } else if (o.row) {
                     rows.push(o.row);                        /// {md5, x, y}
                 } else if (o.exception) {
@@ -586,6 +588,7 @@ function hideReport() {
     document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
     reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
     if (mode === 'thumbs') redraw();                         /// restore the thumbnail tiles
+    updateURL();
 }
 /// Toggle the map-shrink layout and tell Leaflet to re-measure its container.
 function layoutForReport(open) { document.body.classList.toggle('report-open', open); map.invalidateSize(); }
@@ -600,14 +603,24 @@ function buildSwitch(elemId, keys, current, onPick) {
         el.appendChild(s);
     });
 }
+/// ---- init: restore state from the URL hash, build the UI, then keep the URL in sync ----
+const urlp = new URLSearchParams(location.hash.slice(1));
+if (DATASETS[urlp.get('ds')]) dataset = urlp.get('ds');
+if (urlp.get('mode') === 'points' || urlp.get('mode') === 'thumbs') mode = urlp.get('mode');
+if (urlp.get('type')) rep.type = urlp.get('type');
+if (urlp.get('rot')) rep.rot = urlp.get('rot');
+if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
+if (+urlp.get('dims')) rep.dims = +urlp.get('dims');
+
 buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     dataset = k;
     rep.dims = Math.min(rep.dims, repMaxDims());   /// keep the selected #dims if the new embedding supports it, else clamp to its max
     makeLayer();
     /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset
     if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
+    updateURL();
 });
-buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; hideHover(); redraw(); });
+buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; hideHover(); redraw(); updateURL(); });
 
 /// offset the Leaflet top controls below the (variable-height, wrappable) header bar
 function offsetControls() {
@@ -618,6 +631,26 @@ offsetControls();
 addEventListener('resize', offsetControls);
 
 makeLayer();
+
+/// restore the map view + reopen the report (after the layer exists)
+if (urlp.get('md5')) showReport(urlp.get('md5'));
+if (urlp.has('z') && urlp.has('x') && urlp.has('y'))
+    map.setView(dataToLatLng(+urlp.get('x'), +urlp.get('y')), +urlp.get('z'));
+
+/// serialize state -> URL hash (bookmarkable/shareable); replaceState so it doesn't spam history
+function updateURL() {
+    const c = latlngToData(map.getCenter());
+    const p = new URLSearchParams();
+    p.set('ds', dataset); p.set('mode', mode);
+    p.set('z', Math.round(map.getZoom())); p.set('x', c.x); p.set('y', c.y);
+    if (reportActive && curReport) {
+        p.set('md5', curReport); p.set('type', rep.type); p.set('rot', rep.rot);
+        p.set('bits', rep.bits); p.set('dims', rep.dims);
+    }
+    history.replaceState(null, '', '#' + p.toString());
+}
+map.on('moveend zoomend', updateURL);
+updateURL();
 </script>
 </body>
 </html>
