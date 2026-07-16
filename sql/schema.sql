@@ -1,6 +1,8 @@
 -- Embeddings Explorer — ClickHouse schema for the projection + map + read-only access.
--- Applied to mmcommons.emb_siglip2 (dim 1152); replicate for emb_clip / emb_nomic (dim 768:
--- use 3 slices of 256 => arraySlice(v,1,256),(257,256),(513,256), and recompute the n*sigma constants).
+-- Applied to mmcommons.emb_siglip2 (dim 1152). The 768-dim datasets emb_clip / emb_nomic are
+-- enriched the same way -- see the "768-dim datasets" section at the bottom for the exact DDL.
+-- NOTE: randomHadamardTransform pads 1152 -> 2048 but leaves 768 -> 768 (it does NOT pad to the next
+-- power of 2 here), so for clip/nomic the rotated QBit dim is 768 and x/y/z use 3 slices of 256.
 
 -- 1) Hadamard-rotated embedding (stored, QBit) — basis for the projection and the "rotated"/bits+strides
 --    representation switcher. randomHadamardTransform is deterministic; 1152 pads to 2048.
@@ -80,3 +82,29 @@ ALTER USER website_thumbs SETTINGS
 
 -- Tile query (point cloud), parameterized by {z,x,y,table}; returns sparse (px,py,r,g,b) RowBinary.
 -- Density -> OKLCH lightness, mean projected-z -> OKLCH hue.  See site/index.html tileSQL().
+
+
+-- ============================================================================================
+-- 768-dim datasets: emb_clip, emb_nomic  (same columns/projection as siglip2, dims adjusted)
+-- randomHadamardTransform does NOT pad 768 -> the rotated QBit is dim 768 (stride 128 -> 6 groups),
+-- and x/y/z use 3 slices of 256 (arraySlice ...,1,256 / 257,256 / 513,256) covering all 768 dims.
+-- The mean +- n*sigma normalization constants are measured PER MODEL (n_xy=2.5, n_z=0.7):
+--   x: (sum + off_x)/scale_x,  off = n*sigma - mean,  scale = 2*n*sigma
+--   clip : x +1.0025 /1.8655   y +0.8934 /1.72     z -0.2332 /0.5748
+--   nomic: x +0.3414 /1.54     y +1.5506 /1.4005   z +0.527  /0.3644
+-- Run scripts/enrich_clip_nomic.sh (3 passes, async mutations). Example for one table (clip):
+--
+-- ALTER TABLE mmcommons.emb_clip ADD COLUMN embedding_rotated QBit(BFloat16, 768, 128)
+--     DEFAULT randomHadamardTransform(CAST(embedding, 'Array(BFloat16)'));
+-- ALTER TABLE mmcommons.emb_clip MATERIALIZE COLUMN embedding_rotated;   -- must finish before x/y/z
+-- ALTER TABLE mmcommons.emb_clip
+--     ADD COLUMN embedding_strided     QBit(BFloat16, 768, 128) DEFAULT CAST(embedding, 'Array(BFloat16)'),
+--     ADD COLUMN embedding_int         QBit(Int8, 768, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
+--     ADD COLUMN embedding_rotated_int QBit(Int8, 768, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE),
+--     ADD COLUMN x UInt32 MATERIALIZED toUInt32(round(clamp((arraySum(arraySlice(CAST(embedding_rotated,'Array(Float32)'),  1,256)) + 1.0025)/1.8655, 0.,1.) * 4294967295)),
+--     ADD COLUMN y UInt32 MATERIALIZED toUInt32(round(clamp((arraySum(arraySlice(CAST(embedding_rotated,'Array(Float32)'),257,256)) + 0.8934)/1.72  , 0.,1.) * 4294967295)),
+--     ADD COLUMN z UInt16 MATERIALIZED toUInt16(round(clamp((arraySum(arraySlice(CAST(embedding_rotated,'Array(Float32)'),513,256)) - 0.2332)/0.5748, 0.,1.) * 65535));
+-- ALTER TABLE mmcommons.emb_clip MATERIALIZE COLUMN embedding_strided, embedding_int, embedding_rotated_int, x, y, z;
+-- ALTER TABLE mmcommons.emb_clip ADD PROJECTION proj_xy (SELECT x, y, z, md5 ORDER BY mortonEncode(x, y));
+-- ALTER TABLE mmcommons.emb_clip MATERIALIZE PROJECTION proj_xy;
+-- (emb_nomic identical with its own x/y/z constants above.)
