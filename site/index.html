@@ -390,6 +390,7 @@ async function runSimilar() {
         for (const m of rows) next.push(thumbImg(m, false));
         grid.replaceChildren(...next);
         grid.classList.remove('loading');
+        hideError();                                         /// clear any stale error after a successful load
         const secs = (+(prog && prog.elapsed_ns) || 0) / 1e9, rr = +(prog && prog.read_rows) || 0, rb = +(prog && prog.read_bytes) || 0;
         stats.innerHTML = `top-${rows.length} in <b>${secs.toFixed(3)} s</b> · ${fmtNum(secs ? rr / secs : 0)} rows/s · ` +
             `${fmtBytes(secs ? rb / secs : 0)}/s · scanned ${fmtNum(rr)} rows, ${fmtBytes(rb)}`;
