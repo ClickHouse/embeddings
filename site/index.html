@@ -34,6 +34,7 @@
     .repctl > div { display: flex; align-items: center; gap: .25em; }
     .repctl label { color: #999; font-size: 11px; }
     .repctl .opt { padding: .12em .4em; font-size: 11px; }
+    .repstats { font-family: monospace; font-size: 12px; color: #8bc34a; margin: .2em 0 .5em; }
     #full { position: absolute; inset: 0; z-index: 1003; background: rgba(0,0,0,.92);
         display: none; align-items: center; justify-content: center; cursor: zoom-out; }
     #full img { max-width: 92%; max-height: 92%; box-shadow: 0 0 40px #000; }
@@ -98,6 +99,8 @@ async function chQuery(sql, params, fmt) {
 function showError(t) { const e = document.getElementById('error'); e.textContent = t; e.style.display = 'block'; }
 function hideError() { document.getElementById('error').style.display = 'none'; }
 function setStatus(t) { document.getElementById('status').textContent = t; }
+function fmtNum(n) { if (!isFinite(n)) return '—'; const u = ['', 'K', 'M', 'B', 'T']; let i = 0; while (n >= 1000 && i < 4) { n /= 1000; i++; } return (i && n < 10 ? n.toFixed(1) : Math.round(n)) + u[i]; }
+function fmtBytes(n) { if (!isFinite(n)) return '—'; const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i && n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + u[i]; }
 
 /// ---- Point-cloud tile query ----
 /// Table name comes from our own config, so it is interpolated (not a {:Identifier} param,
@@ -282,6 +285,7 @@ function renderReportControls() {
            <div><label>bits</label><span id="rc-bits"></span></div>
            <div><label>dims</label><span id="rc-dims"></span></div>
          </div>
+         <div id="rep-stats" class="repstats"></div>
          <div id="grid"></div>`;
     buildSwitch('rc-type', ['BFloat16', 'Int8'],     rep.type, v => { rep.type = v; showReport(curReport); });
     buildSwitch('rc-rot',  ['original', 'rotated'],  rep.rot,  v => { rep.rot  = v; showReport(curReport); });
@@ -293,24 +297,35 @@ async function runSimilar() {
     const table = curTable(), col = qbitInfo().col, md5 = curReport;
     /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
     const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
-    const grid = document.getElementById('grid');
+    const grid = document.getElementById('grid'), stats = document.getElementById('rep-stats');
     grid.innerHTML = `<img src="${thumbURL(md5)}" title="query" style="border-color:#ffd54f">`;
-    setStatus(`top-100: ${col} · ${rep.bits} bits · ${rep.dims} dims…`);
+    stats.textContent = `running: ${col} · ${rep.bits} bits · ${rep.dims} dims…`;
+    setStatus(`top-100: ${col} · ${rep.bits}b · ${rep.dims}d…`);
     try {
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS q
             SELECT md5 FROM ${table}
             WHERE md5 != {md5:String}
             ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC
             LIMIT 100 FORMAT TSV`;
-        const rows = (await (await chQuery(sql, { md5, bits: rep.bits, dims: rep.dims })).text()).trim().split('\n').filter(Boolean);
+        /// wait_end_of_query=1 so X-ClickHouse-Summary (rows/bytes/elapsed) arrives as a header
+        const url = chURL(`default_format=TSV&replace_running_query=1&wait_end_of_query=1` +
+            `&param_md5=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}`);
+        const resp = await fetch(url, { method: 'POST', body: sql });
+        if (!resp.ok) throw new Error(await resp.text());
+        const text = (await resp.text()).trim();
+        const s = JSON.parse(resp.headers.get('X-ClickHouse-Summary') || '{}');
+        const secs = (+s.elapsed_ns || 0) / 1e9, rr = +s.read_rows || 0, rb = +s.read_bytes || 0;
+        const rows = text ? text.split('\n').filter(Boolean) : [];
         for (const m of rows) {
             const img = document.createElement('img');
             img.src = thumbURL(m); img.title = m;
             img.onclick = () => showFull(m);
             grid.appendChild(img);
         }
-        setStatus(`report: ${rows.length} · ${col} · ${rep.bits}b · ${rep.dims}d`);
-    } catch (err) { showError(String(err).slice(0, 500)); }
+        stats.innerHTML = `top-${rows.length} in <b>${secs.toFixed(3)} s</b> · ${fmtNum(rr / secs)} rows/s · ` +
+            `${fmtBytes(rb / secs)}/s · scanned ${fmtNum(rr)} rows, ${fmtBytes(rb)}`;
+        setStatus(`report: ${rows.length} · ${secs.toFixed(2)}s · ${fmtBytes(rb)}`);
+    } catch (err) { showError(String(err).slice(0, 500)); document.getElementById('rep-stats').textContent = 'error'; }
 }
 function showFull(md5) {
     document.getElementById('full-img').src = fullURL(md5);
