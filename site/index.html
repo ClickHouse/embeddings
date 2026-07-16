@@ -37,6 +37,11 @@
     .repctl label { color: #999; font-size: 11px; }
     .repctl .opt { padding: .12em .4em; font-size: 11px; }
     .repstats { font-family: monospace; font-size: 12px; color: #8bc34a; margin: .2em 0 .5em; }
+    /* live query progress bar (JSONEachRowWithProgress), play.html-style */
+    #rep-progress { height: 8px; background: #222; border: 1px solid #333; border-radius: 4px;
+        overflow: hidden; margin: .2em 0 .4em; display: none; }
+    #rep-progress > div { height: 100%; width: 0; transition: width .15s ease-out;
+        background: linear-gradient(90deg, #8bc34a, #ffd54f); }
     /* non-modal full-size preview shown on hover, pinned to the bottom-left corner */
     #full { position: absolute; left: 10px; bottom: 10px; z-index: 1003;
         display: none; pointer-events: none; }
@@ -85,6 +90,7 @@ let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
 let curReport = null;                                       /// md5 of the open report
 let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
+let repAbort = null;                                        /// aborts a still-running scan when switching
 /// report similarity config — default: Int8, rotated, original #dims (1152 for siglip2)
 let rep = { type: 'Int8', rot: 'rotated', bits: 8, dims: DATASETS[dataset].dim };
 const curTable = () => DATASETS[dataset].table;
@@ -102,6 +108,14 @@ async function chQuery(sql, params, fmt) {
     const resp = await fetch(chURL(extra), { method: 'POST', body: sql });
     if (!resp.ok) throw new Error(await resp.text());
     return resp;
+}
+/// Total row count per table (cached) — used as the progress-bar denominator, since
+/// progress.total_rows_to_read is unreliable under parallel replicas.
+const rowCounts = {};
+async function tableRows(table) {
+    if (rowCounts[table] == null)
+        rowCounts[table] = +(await (await chQuery(`SELECT count() FROM ${table}`, {}, 'TSV')).text()).trim() || 0;
+    return rowCounts[table];
 }
 function showError(t) { const e = document.getElementById('error'); e.textContent = t; e.style.display = 'block'; }
 function hideError() { document.getElementById('error').style.display = 'none'; }
@@ -297,6 +311,7 @@ function buildReportShell() {
            <div><label>bits</label><span id="rc-bits"></span></div>
            <div><label>dims</label><span id="rc-dims"></span></div>
          </div>
+         <div id="rep-progress"><div></div></div>
          <div id="rep-stats" class="repstats"></div>
          <div id="grid"></div>`;
     buildSwitch('rc-type', ['BFloat16', 'Int8'],    rep.type, v => { rep.type = v; switchRep(); });
@@ -320,40 +335,68 @@ async function runSimilar() {
     /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
     const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
     const grid = document.getElementById('grid'), stats = document.getElementById('rep-stats');
+    const bar = document.getElementById('rep-progress'), barFill = bar.firstElementChild;
     const seq = ++repSeq;
+    if (repAbort) repAbort.abort();                          /// cancel a still-running previous scan
+    const ac = repAbort = new AbortController();
     /// first open: show the query thumbnail immediately (nothing to compare against yet);
     /// on a switch/re-target keep the current pictures but dim them to 50% until the new result loads
     if (grid.children.length) grid.classList.add('loading');
     else grid.replaceChildren(thumbImg(md5, true));
+    bar.style.display = 'block'; barFill.style.width = '0%';
     stats.textContent = `running: ${col} · ${rep.bits} bits · ${rep.dims} dims…`;
     setStatus(`top-100: ${col} · ${rep.bits}b · ${rep.dims}d…`);
     try {
+        const total = await tableRows(table);               /// bar denominator (progress.total_rows_to_read is unreliable w/ parallel replicas)
+        if (seq !== repSeq) return;
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS q
             SELECT md5 FROM ${table}
             WHERE md5 != {md5:String}
             ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC
-            LIMIT 100 FORMAT TSV`;
-        /// wait_end_of_query=1 so X-ClickHouse-Summary (rows/bytes/elapsed) arrives as a header
-        const url = chURL(`default_format=TSV&replace_running_query=1&wait_end_of_query=1` +
+            LIMIT 100 FORMAT JSONEachRowWithProgress`;
+        /// stream the response (NO wait_end_of_query) so progress events arrive live during the scan
+        const url = chURL(`replace_running_query=1` +
             `&param_md5=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}`);
-        const resp = await fetch(url, { method: 'POST', body: sql });
+        const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
         if (!resp.ok) throw new Error(await resp.text());
-        const text = (await resp.text()).trim();
+        const reader = resp.body.getReader(), decoder = new TextDecoder();
+        let buf = '', rows = [], prog = null;
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\n')) >= 0) {          /// JSONEachRowWithProgress = newline-delimited {progress|row|meta|exception}
+                const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+                if (!line) continue;
+                const o = JSON.parse(line);
+                if (o.progress) {
+                    prog = o.progress;
+                    const rr = +prog.read_rows || 0, secs = (+prog.elapsed_ns || 0) / 1e9, rb = +prog.read_bytes || 0;
+                    barFill.style.width = (total ? Math.min(rr / total, 1) * 100 : 0).toFixed(1) + '%';
+                    stats.innerHTML = `scanned ${fmtNum(rr)} / ${fmtNum(total)} rows · ${fmtBytes(rb)} · ` +
+                        `${fmtNum(secs ? rr / secs : 0)} rows/s · ${fmtBytes(secs ? rb / secs : 0)}/s`;
+                } else if (o.row) {
+                    rows.push(o.row.md5);
+                } else if (o.exception) {
+                    throw new Error(o.exception);
+                }
+            }
+        }
         if (seq !== repSeq) return;                          /// a newer switch superseded this run
-        const s = JSON.parse(resp.headers.get('X-ClickHouse-Summary') || '{}');
-        const secs = (+s.elapsed_ns || 0) / 1e9, rr = +s.read_rows || 0, rb = +s.read_bytes || 0;
-        const rows = text ? text.split('\n').filter(Boolean) : [];
-        /// swap in the new grid as soon as the query returns (old pictures stay dimmed only during
-        /// the slow query); each thumbnail then appears on its own as it loads, not all at once
+        bar.style.display = 'none';
+        /// swap in the new grid; each thumbnail then appears on its own as it loads, not all at once
         const next = [thumbImg(md5, true)];
         for (const m of rows) next.push(thumbImg(m, false));
         grid.replaceChildren(...next);
         grid.classList.remove('loading');
-        stats.innerHTML = `top-${rows.length} in <b>${secs.toFixed(3)} s</b> · ${fmtNum(rr / secs)} rows/s · ` +
-            `${fmtBytes(rb / secs)}/s · scanned ${fmtNum(rr)} rows, ${fmtBytes(rb)}`;
+        const secs = (+(prog && prog.elapsed_ns) || 0) / 1e9, rr = +(prog && prog.read_rows) || 0, rb = +(prog && prog.read_bytes) || 0;
+        stats.innerHTML = `top-${rows.length} in <b>${secs.toFixed(3)} s</b> · ${fmtNum(secs ? rr / secs : 0)} rows/s · ` +
+            `${fmtBytes(secs ? rb / secs : 0)}/s · scanned ${fmtNum(rr)} rows, ${fmtBytes(rb)}`;
         setStatus(`report: ${rows.length} · ${secs.toFixed(2)}s · ${fmtBytes(rb)}`);
     } catch (err) {
-        if (seq !== repSeq) return;                          /// ignore errors from a superseded run
+        if (seq !== repSeq) return;                          /// superseded/aborted -> ignore
+        bar.style.display = 'none';
         grid.classList.remove('loading');                   /// restore brightness of the kept pictures
         showError(String(err).slice(0, 500));
         stats.textContent = 'error';
