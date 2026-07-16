@@ -12,6 +12,8 @@
     #map { position: absolute; inset: 0; background: #000; cursor: crosshair; }
     /* when the report is open, shrink the map so the panel sits beside it (no overlap) */
     body.report-open #map { right: min(40%, 640px); }
+    /* keep Leaflet's top controls (zoom) clear of the top header bar; JS refines to exact panel height */
+    .leaflet-top { margin-top: 42px; }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
@@ -456,6 +458,14 @@ buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
 });
 buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; redraw(); });
+
+/// offset the Leaflet top controls below the (variable-height, wrappable) header bar
+function offsetControls() {
+    const h = document.getElementById('panel').offsetHeight + 6;
+    document.querySelectorAll('.leaflet-control-container .leaflet-top').forEach(el => el.style.marginTop = h + 'px');
+}
+offsetControls();
+addEventListener('resize', offsetControls);
 
 makeLayer();
 </script>
