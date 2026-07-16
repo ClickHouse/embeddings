@@ -36,7 +36,7 @@
     #status { margin-left: auto; color: #8bc34a; font-family: monospace; }
     #report { position: absolute; top: 0; right: 0; bottom: 0; width: 40%; max-width: 640px;
         z-index: 1002; background: rgba(15,15,15,.97); overflow-y: auto; display: none;
-        box-shadow: -4px 0 20px rgba(0,0,0,.7); }
+        scrollbar-gutter: stable; box-shadow: -4px 0 20px rgba(0,0,0,.7); }
     /* sticky top-K header: title + controls + progress stay put while the grid scrolls under it */
     #rep-head { position: sticky; top: 0; z-index: 5; background: #101010;
         padding: .5em .6em .4em; box-shadow: 0 3px 10px rgba(0,0,0,.55); }
@@ -413,6 +413,8 @@ function showReport(md5) {
     document.getElementById('rc-query').innerHTML =
         `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
     buildRepScales();
+    fitPanelWidth();                                         /// size the panel to a whole number of columns
+
     if (changed) {                                           /// target changed -> scroll to top and start from the initial top-K
         document.getElementById('report').scrollTop = 0;
         repTarget = pages15();
@@ -591,7 +593,25 @@ function hideReport() {
     updateURL();
 }
 /// Toggle the map-shrink layout and tell Leaflet to re-measure its container.
-function layoutForReport(open) { document.body.classList.toggle('report-open', open); map.invalidateSize(); }
+function layoutForReport(open) {
+    document.body.classList.toggle('report-open', open);
+    if (!open) { const r = document.getElementById('report'); r.style.width = ''; r.style.maxWidth = ''; document.getElementById('map').style.right = ''; }
+    map.invalidateSize();
+}
+/// Size the panel to a whole number of thumbnail columns (no leftover gutter on the right),
+/// and match the map's right edge to it. Recomputed on open and on window resize.
+function fitPanelWidth() {
+    const report = document.getElementById('report'), grid = document.getElementById('grid');
+    if (!grid) return;
+    const CELL = 75, GAP = 3, cs = getComputedStyle(grid);
+    const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+    const sb = report.offsetWidth - report.clientWidth;   /// reserved scrollbar gutter (scrollbar-gutter: stable)
+    const maxContent = Math.min(window.innerWidth * 0.40, 640) - padX - sb;
+    const cols = Math.max(1, Math.floor((maxContent + GAP) / (CELL + GAP)));
+    const w = cols * CELL + (cols - 1) * GAP + padX + sb;
+    report.style.maxWidth = 'none'; report.style.width = w + 'px';
+    if (reportActive) { document.getElementById('map').style.right = w + 'px'; map.invalidateSize(); }
+}
 
 /// ---- Switchers ----
 function buildSwitch(elemId, keys, current, onPick) {
@@ -628,7 +648,7 @@ function offsetControls() {
     document.querySelectorAll('.leaflet-control-container .leaflet-top').forEach(el => el.style.marginTop = h + 'px');
 }
 offsetControls();
-addEventListener('resize', offsetControls);
+addEventListener('resize', () => { offsetControls(); if (reportActive) fitPanelWidth(); });
 
 makeLayer();
 
