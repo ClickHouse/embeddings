@@ -70,8 +70,8 @@ CREATE USER IF NOT EXISTS website_thumbs IDENTIFIED WITH sha256_password BY 'Emb
 GRANT SELECT ON mmcommons.* TO website_thumbs;
 ALTER USER website_thumbs SETTINGS
     use_query_cache = 1,                 -- thumbnails repeat a lot -> query cache is a big win
-    query_cache_ttl = 2147483647,        -- effectively infinite; this is the max (int32 seconds ~68y):
-                                         -- larger values overflow internally to a PAST date (100y -> 1990)
+    query_cache_ttl = 31536000,          -- 1 year (default is 60s; max safe is int32 seconds ~68y --
+                                         -- larger values overflow internally to a PAST date, e.g. 100y -> 1990)
     max_execution_time = 10 MAX 30,
     max_memory_usage = 2000000000 MAX 4000000000,
     max_result_rows = 100000 MAX 1000000,
