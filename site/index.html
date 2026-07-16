@@ -18,6 +18,10 @@
     #hover { position: absolute; width: 75px; height: 75px; z-index: 1001; pointer-events: none;
         display: none; image-rendering: pixelated; border: 2px solid #ffd54f; background: #222;
         box-shadow: 0 0 12px #000; }
+    /* top-K result thumbnails overlaid on the point cloud, centered on each image's (x,y) point */
+    .topk-marker { background: none; border: 0; }
+    .topk-marker img { width: 75px; height: 75px; box-sizing: border-box; display: block;
+        image-rendering: pixelated; border: 2px solid rgba(255,213,79,.9); box-shadow: 0 0 6px #000; cursor: pointer; }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
@@ -190,7 +194,7 @@ async function renderTile(coords, canvas) {
     const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
     try {
-        if (mode === 'thumbs') { await renderThumbs(p, table, q99, ctx); return; }
+        if (mode === 'thumbs' && !reportActive) { await renderThumbs(p, table, q99, ctx); return; }
         const buf = await (await chQuery(tileSQL(table, q99), p)).arrayBuffer();
         const dv = new DataView(buf);
         const img = ctx.createImageData(TILE, TILE);
@@ -264,6 +268,24 @@ function makeLayer() {
     layer.addTo(map);
 }
 function redraw() { if (layer) layer.redraw(); }
+
+/// ---- top-K overlay: result thumbnails placed on the map at their (x,y) points ----
+let reportActive = false;
+const topkLayer = L.layerGroup();
+/// inverse of latlngToData: data coords (0..2^32) -> CRS.Simple latlng
+function dataToLatLng(x, y) { const s = Math.pow(2, COORD_BITS) / TILE; return map.unproject([x / s, y / s], 0); }
+function clearOverlay() { topkLayer.clearLayers(); }
+function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> 75px thumbnail markers centered on each point
+    for (const r of rows) {
+        const icon = L.divIcon({ className: 'topk-marker', html: `<img src="${thumbURL(r.md5)}" draggable="false">`,
+            iconSize: [75, 75], iconAnchor: [37.5, 37.5] });
+        L.marker(dataToLatLng(+r.x, +r.y), { icon, keyboard: false, riseOnHover: true })
+            .on('click', () => showReport(r.md5))
+            .on('mouseover', () => previewImg(r.md5))
+            .on('mouseout', hidePreview)
+            .addTo(topkLayer);
+    }
+}
 
 /// data coords (0..2^32) from a Leaflet CRS.Simple latlng
 function latlngToData(latlng) {
@@ -352,6 +374,9 @@ function showReport(md5) {
     rep.dims = Math.min(rep.dims, repMaxDims());
     document.getElementById('report').style.display = 'block';
     layoutForReport(true);                                   /// push the map left so the panel doesn't overlap it
+    if (!reportActive) {                                     /// entering report: overlay on, hide the thumbnail tiles (show point cloud)
+        reportActive = true; topkLayer.addTo(map); if (mode === 'thumbs') redraw();
+    }
     if (!document.getElementById('grid')) buildReportShell();
     document.getElementById('rc-query').innerHTML =
         `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
@@ -432,7 +457,7 @@ async function runSimilar(more) {
         if (seq !== repSeq) return;
         /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS q
-            SELECT md5 FROM ${table}
+            SELECT md5, x, y FROM ${table}
             WHERE md5 != {md5:String}
             ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC, md5 ASC
             LIMIT {off:UInt32}, {cnt:UInt32} FORMAT JSONEachRowWithProgress`;
@@ -459,7 +484,7 @@ async function runSimilar(more) {
                     barFill.style.width = (total ? Math.min(rr / total, 1) * 100 : 0).toFixed(1) + '%';
                     stats.textContent = `${more ? 'loading more' : 'scanning'}: ${fmtNum(rr)} / ${fmtNum(total)} rows`;
                 } else if (o.row) {
-                    rows.push(o.row.md5);
+                    rows.push(o.row);                        /// {md5, x, y}
                 } else if (o.exception) {
                     throw new Error(o.exception);
                 }
@@ -468,13 +493,15 @@ async function runSimilar(more) {
         if (seq !== repSeq) return;                          /// a newer switch superseded this run (it owns repLoading)
         bar.style.display = 'none';
         if (more) {
-            for (const m of rows) grid.appendChild(thumbImg(m, false));   /// append the next page (keeps scroll position)
+            for (const r of rows) grid.appendChild(thumbImg(r.md5, false));   /// append the next page (keeps scroll position)
+            addOverlayThumbs(rows);                                           /// and place them on the map
             repLoaded += rows.length;
         } else {
             const next = [thumbImg(md5, true)];                            /// rebuild: query thumb + results
-            for (const m of rows) next.push(thumbImg(m, false));
+            for (const r of rows) next.push(thumbImg(r.md5, false));
             grid.replaceChildren(...next);
             grid.classList.remove('loading');
+            clearOverlay(); addOverlayThumbs(rows);                        /// refresh the on-map overlay
             repLoaded = rows.length;
         }
         repMore = rows.length === cnt && repLoaded < MAX_RESULTS;          /// full batch -> more may exist
@@ -523,7 +550,11 @@ function previewImg(md5) {
     document.getElementById('full').style.display = 'block';
 }
 function hidePreview() { document.getElementById('full').style.display = 'none'; }
-function hideReport() { document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false); }
+function hideReport() {
+    document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
+    reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
+    if (mode === 'thumbs') redraw();                         /// restore the thumbnail tiles
+}
 /// Toggle the map-shrink layout and tell Leaflet to re-measure its container.
 function layoutForReport(open) { document.body.classList.toggle('report-open', open); map.invalidateSize(); }
 
