@@ -10,6 +10,8 @@
     html, body { margin: 0; height: 100%; background: #000; color: #eee;
         font-family: system-ui, sans-serif; overflow: hidden; }
     #map { position: absolute; inset: 0; background: #000; cursor: crosshair; }
+    /* when the report is open, shrink the map so the panel sits beside it (no overlap) */
+    body.report-open #map { right: min(40%, 640px); }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
@@ -73,18 +75,20 @@ const THUMBS = 'mmcommons.image_thumbs2';
 const S3 = 'https://multimedia-commons.s3.us-west-2.amazonaws.com/data/images';
 const TILE = 1024;                 /// tile pixel size
 const COORD_BITS = 32;             /// x,y live in [0, 2^32)
+/// dim = original embedding dim; rdim = rotated QBit dim (randomHadamardTransform pads 1152->2048
+/// but leaves 768->768). q99 = z=0 per-pixel density for brightness (still siglip2's for clip/nomic).
 const DATASETS = {
-    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152, q99: 378 },
-    clip:    { table: 'mmcommons.emb_clip',    dim: 768,  q99: 378 },  /// q99 measured for siglip2; re-measure clip/nomic when built
-    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  q99: 378 },
+    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152, rdim: 2048, q99: 378 },
+    clip:    { table: 'mmcommons.emb_clip',    dim: 768,  rdim: 768,  q99: 378 },
+    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  rdim: 768,  q99: 378 },
 };
-/// The 4 QBit representation columns (type x rotation) + their full dimension. Report similarity
-/// uses ONLY these QBit columns via cosineDistanceTransposed(qbit, ref[dims], bits, dims).
+/// The 4 QBit representation columns (type x rotation). Report similarity uses ONLY these via
+/// cosineDistanceTransposed(qbit, ref[dims], bits, dims). The QBit dim is dataset-aware (see qbitInfo).
 const QBIT = {
-    'BFloat16|original': { col: 'embedding_strided',     dim: 1152 },
-    'BFloat16|rotated':  { col: 'embedding_rotated',     dim: 2048 },
-    'Int8|original':     { col: 'embedding_int',         dim: 1152 },
-    'Int8|rotated':      { col: 'embedding_rotated_int', dim: 2048 },
+    'BFloat16|original': { col: 'embedding_strided',     rot: false },
+    'BFloat16|rotated':  { col: 'embedding_rotated',     rot: true  },
+    'Int8|original':     { col: 'embedding_int',         rot: false },
+    'Int8|rotated':      { col: 'embedding_rotated_int', rot: true  },
 };
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
@@ -94,7 +98,8 @@ let repAbort = null;                                        /// aborts a still-r
 /// report similarity config — default: Int8, rotated, original #dims (1152 for siglip2)
 let rep = { type: 'Int8', rot: 'rotated', bits: 8, dims: DATASETS[dataset].dim };
 const curTable = () => DATASETS[dataset].table;
-const qbitInfo = () => QBIT[`${rep.type}|${rep.rot}`];
+/// QBit dim is dataset-aware: rotated cols use the dataset's rotated dim (rdim), others its original dim.
+const qbitInfo = () => { const q = QBIT[`${rep.type}|${rep.rot}`], d = DATASETS[dataset]; return { col: q.col, dim: q.rot ? d.rdim : d.dim }; };
 const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
 const repMaxDims = () => qbitInfo().dim;
 
@@ -295,6 +300,7 @@ function showReport(md5) {
     rep.bits = Math.min(rep.bits, repMaxBits());   /// clamp to current type/rotation
     rep.dims = Math.min(rep.dims, repMaxDims());
     document.getElementById('report').style.display = 'block';
+    layoutForReport(true);                                   /// push the map left so the panel doesn't overlap it
     if (!document.getElementById('grid')) buildReportShell();
     document.getElementById('rc-query').innerHTML =
         `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
@@ -402,8 +408,14 @@ async function runSimilar() {
         if (seq !== repSeq) return;                          /// superseded/aborted -> ignore
         bar.style.display = 'none';
         grid.classList.remove('loading');                   /// restore brightness of the kept pictures
-        showError(String(err).slice(0, 500));
-        stats.textContent = 'error';
+        const msg = String(err);
+        if (/INCORRECT_RESULT_OF_SCALAR_SUBQUERY|empty result/i.test(msg)) {
+            hideError();                                     /// target md5 not embedded in this dataset (datasets differ)
+            stats.textContent = `this image is not in "${dataset}"`;
+        } else {
+            showError(msg.slice(0, 500));
+            stats.textContent = 'error';
+        }
     }
 }
 /// One grid thumbnail: hover shows the full-size preview; clicking a result re-targets the search.
@@ -422,7 +434,9 @@ function previewImg(md5) {
     document.getElementById('full').style.display = 'block';
 }
 function hidePreview() { document.getElementById('full').style.display = 'none'; }
-function hideReport() { document.getElementById('report').style.display = 'none'; hidePreview(); }
+function hideReport() { document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false); }
+/// Toggle the map-shrink layout and tell Leaflet to re-measure its container.
+function layoutForReport(open) { document.body.classList.toggle('report-open', open); map.invalidateSize(); }
 
 /// ---- Switchers ----
 function buildSwitch(elemId, keys, current, onPick) {
@@ -434,7 +448,13 @@ function buildSwitch(elemId, keys, current, onPick) {
         el.appendChild(s);
     });
 }
-buildSwitch('datasets', Object.keys(DATASETS), dataset, k => { dataset = k; makeLayer(); });
+buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
+    dataset = k;
+    rep.dims = DATASETS[k].dim;   /// each dataset at its original #dims (768 clip/nomic, 1152 siglip2)
+    makeLayer();
+    /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset
+    if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
+});
 buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; redraw(); });
 
 makeLayer();
