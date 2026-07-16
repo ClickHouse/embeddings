@@ -31,10 +31,13 @@
     #status { margin-left: auto; color: #8bc34a; font-family: monospace; }
     #report { position: absolute; top: 0; right: 0; bottom: 0; width: 40%; max-width: 640px;
         z-index: 1002; background: rgba(15,15,15,.97); overflow-y: auto; display: none;
-        padding: .6em; box-shadow: -4px 0 20px rgba(0,0,0,.7); }
-    #report h3 { margin: .2em 0 .5em; color: #ffd54f; }
+        box-shadow: -4px 0 20px rgba(0,0,0,.7); }
+    /* sticky top-K header: title + controls + progress stay put while the grid scrolls under it */
+    #rep-head { position: sticky; top: 0; z-index: 5; background: #101010;
+        padding: .5em .6em .4em; box-shadow: 0 3px 10px rgba(0,0,0,.55); }
+    #report h3 { margin: .2em 0 .4em; color: #ffd54f; }
     #report .close { float: right; cursor: pointer; color: #f66; font-size: 18px; }
-    #grid { display: grid; grid-template-columns: repeat(auto-fill, 75px); gap: 3px; }
+    #grid { display: grid; grid-template-columns: repeat(auto-fill, 75px); gap: 3px; padding: .5em .6em .6em; }
     #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
         border: 1px solid #333; background: #222; transition: filter .15s; }
     #grid img:hover { border-color: #ffd54f; }
@@ -68,7 +71,7 @@
     <div class="grp"><label>mode</label><span id="modes"></span></div>
     <span id="status">ready</span>
 </div>
-<div id="report"><span class="close" onclick="hideReport()">✕</span><div id="report-body"></div></div>
+<div id="report"><div id="report-body"></div></div>
 <div id="full"><img id="full-img"></div>
 <img id="hover">
 
@@ -343,6 +346,7 @@ async function hoverPreview(latlng, cp) {
 /// Open (or re-target) the report. First open builds the shell; later calls keep the grid
 /// so the old pictures stay (dimmed) until the new result loads.
 function showReport(md5) {
+    const changed = md5 !== curReport;                       /// new/re-targeted image vs same target (e.g. dataset switch)
     curReport = md5;
     rep.bits = Math.min(rep.bits, repMaxBits());   /// clamp to current type/rotation
     rep.dims = Math.min(rep.dims, repMaxDims());
@@ -352,7 +356,10 @@ function showReport(md5) {
     document.getElementById('rc-query').innerHTML =
         `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
     buildRepScales();
-    repTarget = pages15();                                   /// new target/dataset -> reset to ~1.5 pages
+    if (changed) {                                           /// target changed -> scroll to top and start from the initial top-K
+        document.getElementById('report').scrollTop = 0;
+        repTarget = pages15();
+    }
     runSimilar(false);
 }
 /// how many result thumbnails fill ~1.5 panel pages (the initial load size)
@@ -366,16 +373,19 @@ function pages15() {
 }
 function buildReportShell() {
     document.getElementById('report-body').innerHTML =
-        `<h3 id="rc-title">Top-100 similar</h3>
-         <div>query: <span id="rc-query"></span></div>
-         <div class="repctl">
-           <div><label>type</label><span id="rc-type"></span></div>
-           <div><label>rotation</label><span id="rc-rot"></span></div>
-           <div><label>bits</label><span id="rc-bits"></span></div>
-           <div><label>dims</label><span id="rc-dims"></span></div>
+        `<div id="rep-head">
+           <span class="close" onclick="hideReport()">✕</span>
+           <h3 id="rc-title">Top-100 similar</h3>
+           <div>query: <span id="rc-query"></span></div>
+           <div class="repctl">
+             <div><label>type</label><span id="rc-type"></span></div>
+             <div><label>rotation</label><span id="rc-rot"></span></div>
+             <div><label>bits</label><span id="rc-bits"></span></div>
+             <div><label>dims</label><span id="rc-dims"></span></div>
+           </div>
+           <div id="rep-progress"><div></div></div>
+           <div id="rep-stats" class="repstats"></div>
          </div>
-         <div id="rep-progress"><div></div></div>
-         <div id="rep-stats" class="repstats"></div>
          <div id="grid"></div>`;
     buildSwitch('rc-type', ['BFloat16', 'Int8'],    rep.type, v => { rep.type = v; switchRep(); });
     buildSwitch('rc-rot',  ['original', 'rotated'], rep.rot,  v => { rep.rot  = v; switchRep(); });
@@ -391,7 +401,9 @@ function switchRep() {
     rep.bits = Math.min(rep.bits, repMaxBits());
     rep.dims = Math.min(rep.dims, repMaxDims());
     buildRepScales();
-    runSimilar(false);   /// rebuild at the current target count (keep the scrolled-in amount)
+    document.getElementById('report').scrollTop = 0;   /// any switch -> back to top with the initial top-K
+    repTarget = pages15();
+    runSimilar(false);
 }
 /// Run the similarity scan. more=false rebuilds the grid to the top-`repTarget`; more=true appends
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
@@ -527,7 +539,7 @@ function buildSwitch(elemId, keys, current, onPick) {
 }
 buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     dataset = k;
-    rep.dims = DATASETS[k].dim;   /// each dataset at its original #dims (768 clip/nomic, 1152 siglip2)
+    rep.dims = Math.min(rep.dims, repMaxDims());   /// keep the selected #dims if the new embedding supports it, else clamp to its max
     makeLayer();
     /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset
     if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
