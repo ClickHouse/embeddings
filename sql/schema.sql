@@ -20,10 +20,14 @@ ALTER TABLE mmcommons.emb_siglip2 MATERIALIZE COLUMN embedding_rotated
 -- 1b) Additional QBit representations for the vector-representation switcher (strided BFloat16, and
 --     Int8-quantized of both the original and the rotated). QBit dim = source vector length
 --     (1152 for the original embedding, 2048 for the rotated). Int8 columns use CODEC(NONE).
+--     IMPORTANT: the embeddings are L2-unit-normalized, so each coordinate is ~N(0, 1/sqrt(dim))
+--     (std ~0.03). quantizeBFloat16ToInt8 is tanh-companding tuned for ~N(0,1) inputs, so we scale
+--     each coordinate by sqrt(dim) before quantizing -> ~N(0,1) -> uses the full Int8 range (else the
+--     Int8 values sit in a tiny +-3..50 band, wasting ~4 bits). sqrt(dim) = source vector length.
 ALTER TABLE mmcommons.emb_siglip2
     ADD COLUMN `embedding_strided`     QBit(BFloat16, 1152, 128) DEFAULT CAST(embedding, 'Array(BFloat16)'),
-    ADD COLUMN `embedding_int`         QBit(Int8, 1152, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
-    ADD COLUMN `embedding_rotated_int` QBit(Int8, 2048, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE);
+    ADD COLUMN `embedding_int`         QBit(Int8, 1152, 128) DEFAULT arrayMap(x -> quantizeBFloat16ToInt8(toBFloat16(x * sqrt(1152))), CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
+    ADD COLUMN `embedding_rotated_int` QBit(Int8, 2048, 128) DEFAULT arrayMap(x -> quantizeBFloat16ToInt8(toBFloat16(x * sqrt(2048))), CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE);
 ALTER TABLE mmcommons.emb_siglip2
     MATERIALIZE COLUMN `embedding_strided`,
     MATERIALIZE COLUMN `embedding_int`,
@@ -99,8 +103,8 @@ ALTER USER website_thumbs SETTINGS
 -- ALTER TABLE mmcommons.emb_clip MATERIALIZE COLUMN embedding_rotated;   -- must finish before x/y/z
 -- ALTER TABLE mmcommons.emb_clip
 --     ADD COLUMN embedding_strided     QBit(BFloat16, 768, 128) DEFAULT CAST(embedding, 'Array(BFloat16)'),
---     ADD COLUMN embedding_int         QBit(Int8, 768, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
---     ADD COLUMN embedding_rotated_int QBit(Int8, 768, 128) DEFAULT arrayMap(quantizeBFloat16ToInt8, CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE),
+--     ADD COLUMN embedding_int         QBit(Int8, 768, 128) DEFAULT arrayMap(x -> quantizeBFloat16ToInt8(toBFloat16(x * sqrt(768))), CAST(embedding, 'Array(BFloat16)')) CODEC(NONE),
+--     ADD COLUMN embedding_rotated_int QBit(Int8, 768, 128) DEFAULT arrayMap(x -> quantizeBFloat16ToInt8(toBFloat16(x * sqrt(768))), CAST(embedding_rotated, 'Array(BFloat16)')) CODEC(NONE),   -- rotated dim is also 768 (no padding)
 --     ADD COLUMN x UInt32 MATERIALIZED toUInt32(round(clamp((arraySum(arraySlice(CAST(embedding_rotated,'Array(Float32)'),  1,256)) + 1.0025)/1.8655, 0.,1.) * 4294967295)),
 --     ADD COLUMN y UInt32 MATERIALIZED toUInt32(round(clamp((arraySum(arraySlice(CAST(embedding_rotated,'Array(Float32)'),257,256)) + 0.8934)/1.72  , 0.,1.) * 4294967295)),
 --     ADD COLUMN z UInt16 MATERIALIZED toUInt16(round(clamp((arraySum(arraySlice(CAST(embedding_rotated,'Array(Float32)'),513,256)) - 0.2332)/0.5748, 0.,1.) * 65535));
