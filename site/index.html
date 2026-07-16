@@ -28,16 +28,20 @@
     #report .close { float: right; cursor: pointer; color: #f66; font-size: 18px; }
     #grid { display: grid; grid-template-columns: repeat(auto-fill, 75px); gap: 3px; }
     #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
-        border: 1px solid #333; background: #222; }
+        border: 1px solid #333; background: #222; transition: filter .15s; }
     #grid img:hover { border-color: #ffd54f; }
+    /// while a new representation loads, keep the old pictures but dim them to 50% for visual diff
+    #grid.loading img { filter: brightness(.5); }
     .repctl { display: flex; flex-wrap: wrap; gap: .3em 1.2em; margin: .5em 0; align-items: center; }
     .repctl > div { display: flex; align-items: center; gap: .25em; }
     .repctl label { color: #999; font-size: 11px; }
     .repctl .opt { padding: .12em .4em; font-size: 11px; }
     .repstats { font-family: monospace; font-size: 12px; color: #8bc34a; margin: .2em 0 .5em; }
-    #full { position: absolute; inset: 0; z-index: 1003; background: rgba(0,0,0,.92);
-        display: none; align-items: center; justify-content: center; cursor: zoom-out; }
-    #full img { max-width: 92%; max-height: 92%; box-shadow: 0 0 40px #000; }
+    /// non-modal full-size preview shown on hover, pinned to the bottom-left corner
+    #full { position: absolute; left: 10px; bottom: 10px; z-index: 1003;
+        display: none; pointer-events: none; }
+    #full img { max-width: 42vw; max-height: 66vh; box-shadow: 0 0 40px #000;
+        border: 2px solid #ffd54f; background: #000; }
     #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
         background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
     a { color: #90caf9; }
@@ -52,12 +56,13 @@
     <span id="status">ready</span>
 </div>
 <div id="report"><span class="close" onclick="hideReport()">✕</span><div id="report-body"></div></div>
-<div id="full" onclick="this.style.display='none'"><img id="full-img"></div>
+<div id="full"><img id="full-img"></div>
 <div id="error"></div>
 <script>
 /// ---- Config ----
 const HOST = 'https://hvdvsqo23t.us-east-2.aws.clickhouse-staging.com:8443';
-const USER = 'website';
+const USER = 'website';                 /// heavy queries: tiles, top-100 search, click lookups
+const USER_THUMBS = 'website_thumbs';   /// point queries: thumbnail image loads (shares the password)
 const PASS = 'Embeddings-Viewer-2026!';
 const THUMBS = 'mmcommons.image_thumbs2';
 const S3 = 'https://multimedia-commons.s3.us-west-2.amazonaws.com/data/images';
@@ -79,6 +84,7 @@ const QBIT = {
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
 let curReport = null;                                       /// md5 of the open report
+let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
 let rep = { type: 'BFloat16', rot: 'original', bits: 8, dims: 1152 };   /// report similarity config
 const curTable = () => DATASETS[dataset].table;
 const qbitInfo = () => QBIT[`${rep.type}|${rep.rot}`];
@@ -86,8 +92,8 @@ const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
 const repMaxDims = () => qbitInfo().dim;
 
 /// ---- ClickHouse HTTP ----
-function chURL(extra) {
-    return `${HOST}/?user=${USER}&password=${encodeURIComponent(PASS)}&${extra}`;
+function chURL(extra, user) {
+    return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}&${extra}`;
 }
 async function chQuery(sql, params, fmt) {
     let extra = `default_format=${fmt || 'RowBinary'}&replace_running_query=1`;
@@ -192,7 +198,7 @@ function thumbURL(md5) {
         SELECT (number % 75) AS x, intDiv(number, 75) AS y, t[number*3+1] AS r, t[number*3+2] AS g, t[number*3+3] AS b
         FROM numbers(75*75) ORDER BY y, x
         FORMAT PNG SETTINGS output_format_image_width = 75, output_format_image_height = 75`;
-    return chURL(`default_format=PNG&param_md5=${encodeURIComponent(md5)}&query=${encodeURIComponent(sql)}`);
+    return chURL(`default_format=PNG&param_md5=${encodeURIComponent(md5)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
 }
 function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}.jpg`; }
 
@@ -267,18 +273,23 @@ map.on('click', async (e) => {
     } catch (err) { showError(String(err).slice(0, 500)); }
 });
 
-async function showReport(md5) {
+/// Open (or re-target) the report. First open builds the shell; later calls keep the grid
+/// so the old pictures stay (dimmed) until the new result loads.
+function showReport(md5) {
     curReport = md5;
     rep.bits = Math.min(rep.bits, repMaxBits());   /// clamp to current type/rotation
     rep.dims = Math.min(rep.dims, repMaxDims());
     document.getElementById('report').style.display = 'block';
-    renderReportControls();
-    await runSimilar();
+    if (!document.getElementById('grid')) buildReportShell();
+    document.getElementById('rc-query').innerHTML =
+        `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
+    buildRepScales();
+    runSimilar();
 }
-function renderReportControls() {
+function buildReportShell() {
     document.getElementById('report-body').innerHTML =
         `<h3>Top-100 similar</h3>
-         <div>query: <a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}</div>
+         <div>query: <span id="rc-query"></span></div>
          <div class="repctl">
            <div><label>type</label><span id="rc-type"></span></div>
            <div><label>rotation</label><span id="rc-rot"></span></div>
@@ -287,18 +298,32 @@ function renderReportControls() {
          </div>
          <div id="rep-stats" class="repstats"></div>
          <div id="grid"></div>`;
-    buildSwitch('rc-type', ['BFloat16', 'Int8'],     rep.type, v => { rep.type = v; showReport(curReport); });
-    buildSwitch('rc-rot',  ['original', 'rotated'],  rep.rot,  v => { rep.rot  = v; showReport(curReport); });
-    buildSwitch('rc-bits', Array.from({length: repMaxBits()}, (_, i) => i + 1), rep.bits, v => { rep.bits = +v; showReport(curReport); });
+    buildSwitch('rc-type', ['BFloat16', 'Int8'],    rep.type, v => { rep.type = v; switchRep(); });
+    buildSwitch('rc-rot',  ['original', 'rotated'], rep.rot,  v => { rep.rot  = v; switchRep(); });
+}
+/// bits/dims ranges depend on type & rotation, so rebuild them on every switch
+function buildRepScales() {
+    buildSwitch('rc-bits', Array.from({length: repMaxBits()}, (_, i) => i + 1), rep.bits, v => { rep.bits = +v; switchRep(); });
     const dims = []; for (let d = 128; d <= repMaxDims(); d += 128) dims.push(d);
-    buildSwitch('rc-dims', dims, rep.dims, v => { rep.dims = +v; showReport(curReport); });
+    buildSwitch('rc-dims', dims, rep.dims, v => { rep.dims = +v; switchRep(); });
+}
+/// Switch representation on the SAME target — keeps the current pictures dimmed until the new load.
+function switchRep() {
+    rep.bits = Math.min(rep.bits, repMaxBits());
+    rep.dims = Math.min(rep.dims, repMaxDims());
+    buildRepScales();
+    runSimilar();
 }
 async function runSimilar() {
     const table = curTable(), col = qbitInfo().col, md5 = curReport;
     /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
     const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
     const grid = document.getElementById('grid'), stats = document.getElementById('rep-stats');
-    grid.innerHTML = `<img src="${thumbURL(md5)}" title="query" style="border-color:#ffd54f">`;
+    const seq = ++repSeq;
+    /// first open: show the query thumbnail immediately (nothing to compare against yet);
+    /// on a switch/re-target keep the current pictures but dim them to 50% until the new result loads
+    if (grid.children.length) grid.classList.add('loading');
+    else grid.replaceChildren(thumbImg(md5, true));
     stats.textContent = `running: ${col} · ${rep.bits} bits · ${rep.dims} dims…`;
     setStatus(`top-100: ${col} · ${rep.bits}b · ${rep.dims}d…`);
     try {
@@ -313,25 +338,52 @@ async function runSimilar() {
         const resp = await fetch(url, { method: 'POST', body: sql });
         if (!resp.ok) throw new Error(await resp.text());
         const text = (await resp.text()).trim();
+        if (seq !== repSeq) return;                          /// a newer switch superseded this run
         const s = JSON.parse(resp.headers.get('X-ClickHouse-Summary') || '{}');
         const secs = (+s.elapsed_ns || 0) / 1e9, rr = +s.read_rows || 0, rb = +s.read_bytes || 0;
         const rows = text ? text.split('\n').filter(Boolean) : [];
-        for (const m of rows) {
-            const img = document.createElement('img');
-            img.src = thumbURL(m); img.title = m;
-            img.onclick = () => showFull(m);
-            grid.appendChild(img);
-        }
+        /// build the new grid off-DOM (query thumbnail first, then results), preload, then swap in one shot
+        const next = [thumbImg(md5, true)];
+        for (const m of rows) next.push(thumbImg(m, false));
+        await preloadImgs(next);
+        if (seq !== repSeq) return;                          /// superseded while preloading thumbnails
+        grid.replaceChildren(...next);
+        grid.classList.remove('loading');
         stats.innerHTML = `top-${rows.length} in <b>${secs.toFixed(3)} s</b> · ${fmtNum(rr / secs)} rows/s · ` +
             `${fmtBytes(rb / secs)}/s · scanned ${fmtNum(rr)} rows, ${fmtBytes(rb)}`;
         setStatus(`report: ${rows.length} · ${secs.toFixed(2)}s · ${fmtBytes(rb)}`);
-    } catch (err) { showError(String(err).slice(0, 500)); document.getElementById('rep-stats').textContent = 'error'; }
+    } catch (err) {
+        if (seq !== repSeq) return;                          /// ignore errors from a superseded run
+        grid.classList.remove('loading');                   /// restore brightness of the kept pictures
+        showError(String(err).slice(0, 500));
+        stats.textContent = 'error';
+    }
 }
-function showFull(md5) {
+/// One grid thumbnail: hover shows the full-size preview; clicking a result re-targets the search.
+function thumbImg(md5, isQuery) {
+    const img = document.createElement('img');
+    img.src = thumbURL(md5);
+    img.title = isQuery ? 'query · hover to preview' : md5 + ' · click to search from here';
+    if (isQuery) img.style.borderColor = '#ffd54f';
+    else img.onclick = () => showReport(md5);
+    img.onmouseenter = () => previewImg(md5);
+    img.onmouseleave = hidePreview;
+    return img;
+}
+function previewImg(md5) {
     document.getElementById('full-img').src = fullURL(md5);
-    document.getElementById('full').style.display = 'flex';
+    document.getElementById('full').style.display = 'block';
 }
-function hideReport() { document.getElementById('report').style.display = 'none'; }
+function hidePreview() { document.getElementById('full').style.display = 'none'; }
+/// resolve once every image has loaded (or errored), with a safety timeout so one slow thumb can't hang the swap
+function preloadImgs(imgs, ms = 8000) {
+    return Promise.race([
+        Promise.all(imgs.map(im => im.complete && im.naturalWidth ? null
+            : new Promise(res => { im.onload = im.onerror = res; }))),
+        new Promise(res => setTimeout(res, ms)),
+    ]);
+}
+function hideReport() { document.getElementById('report').style.display = 'none'; hidePreview(); }
 
 /// ---- Switchers ----
 function buildSwitch(elemId, keys, current, onPick) {
