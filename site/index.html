@@ -117,7 +117,7 @@ function thumbCellsSQL(table) {
     const CELL = 75;
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
-        ts * ${CELL} / ${TILE} AS cell
+        intDiv(ts * ${CELL}, ${TILE}) AS cell
     SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
     FROM (
         SELECT intDiv(x - tx0, cell) AS cx, intDiv(y - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
@@ -221,16 +221,34 @@ function latlngToData(latlng) {
 map.on('click', async (e) => {
     const table = curTable();
     const d = latlngToData(e.latlng);
-    const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
-    const r = Math.max(1, Math.round(px * 6));
-    setStatus('finding nearest point…');
+    setStatus('finding point…');
     try {
-        const sql = `SELECT md5 FROM ${table}
-            WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
-              AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
-            ORDER BY pow(toInt64(x) - toInt64({cx:UInt32}), 2) + pow(toInt64(y) - toInt64({cy:UInt32}), 2) ASC
-            LIMIT 1 FORMAT TSV`;
-        const md5 = (await (await chQuery(sql, { cx: d.x, cy: d.y, r })).text()).trim();
+        let sql, params;
+        if (mode === 'thumbs') {
+            /// Exact thumbnail clicked: reproduce the render's cell (intDiv math) in JS — all values
+            /// < 2^53 so JS is exact — and argMin(md5, cityHash64(md5)) over that cell = the drawn thumb.
+            const z = Math.min(Math.round(map.getZoom()), 20);   /// tile zoom (maxNativeZoom cap)
+            const ts = Math.pow(2, COORD_BITS - z);
+            const cell = Math.floor(ts * 75 / TILE);
+            const tx0 = Math.floor(d.x / ts) * ts, ty0 = Math.floor(d.y / ts) * ts;
+            const x0 = tx0 + Math.floor((d.x - tx0) / cell) * cell;
+            const y0 = ty0 + Math.floor((d.y - ty0) / cell) * cell;
+            const x1 = Math.min(x0 + cell, tx0 + ts), y1 = Math.min(y0 + cell, ty0 + ts);
+            sql = `SELECT argMin(md5, cityHash64(md5)) FROM ${table}
+                WHERE x >= {x0:UInt64} AND x < {x1:UInt64} AND y >= {y0:UInt64} AND y < {y1:UInt64} FORMAT TSV`;
+            params = { x0, y0, x1, y1 };
+        } else {
+            /// Point cloud: nearest visible point to the click.
+            const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
+            const r = Math.max(1, Math.round(px * 6));
+            sql = `SELECT md5 FROM ${table}
+                WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
+                  AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
+                ORDER BY pow(toInt64(x) - toInt64({cx:UInt32}), 2) + pow(toInt64(y) - toInt64({cy:UInt32}), 2) ASC
+                LIMIT 1 FORMAT TSV`;
+            params = { cx: d.x, cy: d.y, r };
+        }
+        const md5 = (await (await chQuery(sql, params)).text()).trim();
         if (md5) showReport(md5); else setStatus('no point near click');
     } catch (err) { showError(String(err).slice(0, 500)); }
 });
