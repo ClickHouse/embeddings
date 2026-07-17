@@ -42,6 +42,7 @@
         padding: .5em .6em .4em; box-shadow: 0 3px 10px rgba(0,0,0,.55); }
     #report h3 { margin: .2em 0 .4em; color: #ff0; }
     #report .close { float: right; cursor: pointer; color: #f66; font-size: 18px; }
+    #report .qcmp { float: right; margin: .35em .8em 0 0; font-size: 12px; }
     #grid { display: grid; grid-template-columns: repeat(auto-fill, 75px); gap: 3px; padding: .5em .6em .6em; }
     #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
         border: 1px solid #333; background: #222; transition: filter .15s; }
@@ -442,6 +443,7 @@ function buildReportShell() {
     document.getElementById('report-body').innerHTML =
         `<div id="rep-head">
            <span class="close" onclick="hideReport()">✕</span>
+           <a class="qcmp" href="recall.html">Quality comparison &#8599;</a>
            <h3 id="rc-title">Top-100 similar</h3>
            <div>query: <span id="rc-query"></span></div>
            <div class="repctl">
