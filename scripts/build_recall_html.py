@@ -34,6 +34,8 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   td.cell { color:#000; font-weight:600; min-width:44px; border:1px solid #111; transition:opacity .08s; line-height:1.15; }
   td.cell.dim { opacity:.15; }         /* on hover: cells below the pointed value fade, so >= cells stand out */
   td.cell .sz { display:block; font-size:9px; font-weight:400; opacity:.6; }   /* bytes/vector, second line */
+  td.cell.pareto { font-weight:900; box-shadow: inset 0 0 0 2px rgba(0,0,0,.65); }   /* pareto frontier (best recall per byte budget) */
+  td.cell.pareto .sz { opacity:.85; }
   .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:11px; }
   .bar { width:180px; height:12px; border-radius:2px;
          background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
@@ -70,12 +72,22 @@ function render() {
   const bits = [...new Set(rows.map(r => r.b))].sort((a,b)=>a-b);
   const dims = [...new Set(rows.map(r => r.d))].sort((a,b)=>a-b);
   const m = {}; rows.forEach(r => m[r.b + '_' + r.d] = r[st.me]);
+  // pareto frontier: a cell is on it if no OTHER cell with fewer bytes has a higher recall
+  const cells = rows.map(r => ({k:r.b+'_'+r.d, v:r[st.me], bytes:r.b*r.d/8})).sort((a,b)=>a.bytes-b.bytes);
+  const pareto = new Set(); let runMax = -Infinity, ci = 0;
+  while (ci < cells.length) {
+    let j = ci; const by = cells[ci].bytes;
+    while (j < cells.length && cells[j].bytes === by) j++;                    // group of equal-bytes cells [ci,j)
+    for (let k=ci; k<j; k++) if (cells[k].v >= runMax) pareto.add(cells[k].k);  // no strictly-cheaper cell beats its recall
+    for (let k=ci; k<j; k++) if (cells[k].v > runMax) runMax = cells[k].v;
+    ci = j;
+  }
   let h = `<table><caption>${st.ds} &middot; ${st.ty} &middot; ${st.ro} &middot; ${METRICS[st.me]}</caption>`;
   h += '<tr><th class=cor>bits&nbsp;\\&nbsp;dims</th>' + dims.map(d => `<th>${d}</th>`).join('') + '</tr>';
   for (const b of bits) {
     h += `<tr><th class=cor>${b}</th>` + dims.map(d => {
       const v = m[b + '_' + d];
-      return v==null ? '<td></td>' : `<td class=cell data-v="${v}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}<span class=sz>${bytesPerVec(b,d)}</span></td>`;
+      return v==null ? '<td></td>' : `<td class="cell${pareto.has(b+'_'+d)?' pareto':''}" data-v="${v}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}<span class=sz>${bytesPerVec(b,d)}</span></td>`;
     }).join('') + '</tr>';
   }
   h += '</table>';
