@@ -16,8 +16,9 @@
   th, td { padding:.28em .5em; text-align:center; font-variant-numeric:tabular-nums; font-size:12px; }
   th { color:#9a9a9a; font-weight:normal; }
   th.cor { color:#ffd54f; }
-  td.cell { color:#000; font-weight:600; min-width:40px; border:1px solid #111; transition:opacity .08s; }
+  td.cell { color:#000; font-weight:600; min-width:44px; border:1px solid #111; transition:opacity .08s; line-height:1.15; }
   td.cell.dim { opacity:.15; }         /* on hover: cells below the pointed value fade, so >= cells stand out */
+  td.cell .sz { display:block; font-size:9px; font-weight:400; opacity:.6; }   /* bytes/vector, second line */
   .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:11px; }
   .bar { width:180px; height:12px; border-radius:2px;
          background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
@@ -38,6 +39,7 @@ const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'R
 let st = { ds:'siglip2', ty:'Int8', ro:'rotated', me:'recall100' };
 const uniq = k => [...new Set(DATA.map(r => r[k]))];
 const color = v => v==null ? '#222' : `hsl(${(v*120).toFixed(0)},75%,50%)`;
+const bytesPerVec = (b,d) => { const n = b*d/8; return n < 1024 ? n+'B' : (n/1024).toFixed(1).replace(/\.0$/,'')+'K'; };
 function buildSwitch(el, keys, cur, onPick, labels) {
   el.innerHTML = '';
   keys.forEach(k => {
@@ -58,7 +60,7 @@ function render() {
   for (const b of bits) {
     h += `<tr><th class=cor>${b}</th>` + dims.map(d => {
       const v = m[b + '_' + d];
-      return v==null ? '<td></td>' : `<td class=cell data-v="${v}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}</td>`;
+      return v==null ? '<td></td>' : `<td class=cell data-v="${v}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}<span class=sz>${bytesPerVec(b,d)}</span></td>`;
     }).join('') + '</tr>';
   }
   h += '</table>';
