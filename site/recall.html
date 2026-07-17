@@ -35,6 +35,10 @@
   svg.chart .ax   { fill:#888; font-size:11px; font-family:monospace; }
   svg.chart .axt  { fill:#aaa; font-size:12px; }
   svg.chart .front{ fill:none; stroke:#ffd54f; stroke-width:2; }
+  svg.chart .dot  { cursor:pointer; }
+  /* cross-highlight: hovering a dot marks its table cell (.xhi); hovering a cell marks its dot(s) (.hi) */
+  td.cell.xhi { outline:2px solid #29b6f6; outline-offset:-2px; box-shadow:0 0 10px 2px rgba(41,182,246,.85); filter:brightness(1.12); position:relative; z-index:3; }
+  svg.chart circle.hi { r:6; stroke:#29b6f6; stroke-width:2.5; opacity:1; }
 </style></head><body>
 <h1>QBit representation recall &mdash; bits &times; dims heatmap</h1>
 <div class=sub>100k-row sample per dataset, 20 random queries, exact-cosine ground truth. Green = 1.0, red = 0.0.</div>
@@ -88,7 +92,7 @@ function render() {
   for (const b of bits) {
     h += `<tr><th class=cor>${b}</th>` + dims.map(d => {
       const v = m[b + '_' + d];
-      return v==null ? '<td></td>' : `<td class="cell${pareto.has(b+'_'+d)?' pareto':''}" data-v="${v}" data-bytes="${b*d/8}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}<span class=sz>${bytesPerVec(b,d)}</span></td>`;
+      return v==null ? '<td></td>' : `<td class="cell${pareto.has(b+'_'+d)?' pareto':''}" data-k="${b}_${d}" data-v="${v}" data-bytes="${b*d/8}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}<span class=sz>${bytesPerVec(b,d)}</span></td>`;
     }).join('') + '</tr>';
   }
   h += '</table>';
@@ -107,13 +111,14 @@ function render() {
     g += `<line class="grid" x1="${ML}" y1="${yy}" x2="${CW-MR}" y2="${yy}"/><text class="ax" x="${ML-6}" y="${+yy+3}" text-anchor="end">${(t/10).toFixed(1)}</text>`; }
   for (let e=Math.ceil(lo); e<=Math.floor(hi); e++){ const by=2**e, xx=X(by);                        // x grid + labels (powers of two bytes)
     g += `<line class="grid" x1="${xx}" y1="${MT}" x2="${xx}" y2="${MT+IH}"/><text class="ax" x="${xx}" y="${MT+IH+16}" text-anchor="middle">${fmtB(by)}</text>`; }
-  P.forEach(p => g += `<circle cx="${X(p.bytes)}" cy="${Y(p.v)}" r="2.4" fill="${color(p.v)}" opacity="0.45">${tip(p)}</circle>`);
+  P.forEach(p => g += `<circle class="dot" data-k="${p.b}_${p.d}" cx="${X(p.bytes)}" cy="${Y(p.v)}" r="2.4" fill="${color(p.v)}" opacity="0.45">${tip(p)}</circle>`);
   const fr = P.filter(p=>p.pa).sort((a,b)=>a.bytes-b.bytes);                                          // pareto frontier line + dots
   g += `<polyline class="front" points="${fr.map(p=>X(p.bytes)+','+Y(p.v)).join(' ')}"/>`;
-  fr.forEach(p => g += `<circle cx="${X(p.bytes)}" cy="${Y(p.v)}" r="4" fill="${color(p.v)}" stroke="#fff" stroke-width="1.5">${tip(p)}</circle>`);
+  fr.forEach(p => g += `<circle class="dot pdot" data-k="${p.b}_${p.d}" cx="${X(p.bytes)}" cy="${Y(p.v)}" r="4" fill="${color(p.v)}" stroke="#fff" stroke-width="1.5">${tip(p)}</circle>`);
   g += `<text class="axt" x="${ML+IW/2}" y="${CH-4}" text-anchor="middle">bytes / vector (log)</text>`;
   g += `<text class="axt" transform="translate(14,${MT+IH/2}) rotate(-90)" text-anchor="middle">${METRICS[st.me]}</text></svg>`;
   document.getElementById('chart').innerHTML = g;
+  alignLeft();
 }
 buildSwitch(document.getElementById('sw-ds'), uniq('ds'), st.ds, k => { st.ds=k; render(); });
 buildSwitch(document.getElementById('sw-ty'), uniq('ty'), st.ty, k => { st.ty=k; render(); });
@@ -122,7 +127,16 @@ buildSwitch(document.getElementById('sw-me'), Object.keys(METRICS), st.me, k => 
 render();
 // hover a cell -> fade every cell whose value is below it, so all cells with >= recall stay highlighted
 const _tbl = document.getElementById('tbl');
+const _chart = document.getElementById('chart');
 const _legval = document.getElementById('legval');
+// align the legend + chart left edges with the first VALUE column (past the bits/dims header column)
+function alignLeft(){
+  const t = document.querySelector('#tbl table'); if (!t || !t.rows[0] || !t.rows[0].cells[1]) return;
+  const pad = (t.rows[0].cells[1].getBoundingClientRect().left - t.getBoundingClientRect().left) + 'px';
+  document.querySelector('.legend').style.paddingLeft = pad;
+  document.querySelector('.chartwrap').style.paddingLeft = pad;
+}
+window.addEventListener('resize', alignLeft);
 // dim cells below the threshold; among those at/above it, outline the single best recall-per-byte cell
 const applyThreshold = v => {
   let best = null, bestRatio = -Infinity;
@@ -134,10 +148,19 @@ const applyThreshold = v => {
   });
   if (best) best.classList.add('best');
 };
-const _clear = () => { _tbl.querySelectorAll('td.cell.dim,td.cell.best').forEach(td => td.classList.remove('dim','best')); _legval.textContent = ''; };
-// hover a cell -> highlight cells with >= its recall
-_tbl.addEventListener('mouseover', e => { const c = e.target.closest('td.cell'); if (!c) { _clear(); return; } applyThreshold(+c.dataset.v); });
+const _dotsOff  = () => _chart.querySelectorAll('circle.hi').forEach(el => el.classList.remove('hi'));
+const _cellsOff = () => _tbl.querySelectorAll('td.cell.xhi').forEach(td => td.classList.remove('xhi'));
+const _clear = () => { _tbl.querySelectorAll('td.cell.dim,td.cell.best').forEach(td => td.classList.remove('dim','best')); _dotsOff(); _legval.textContent = ''; };
+// hover a cell -> highlight cells with >= its recall, and its matching chart dot(s)
+_tbl.addEventListener('mouseover', e => { const c = e.target.closest('td.cell'); if (!c) { _clear(); return; }
+  applyThreshold(+c.dataset.v);
+  _dotsOff(); _chart.querySelectorAll(`circle[data-k="${c.dataset.k}"]`).forEach(el => el.classList.add('hi')); });
 _tbl.addEventListener('mouseleave', _clear);
+// hover a chart dot -> highlight its matching table cell
+_chart.addEventListener('mouseover', e => { const c = e.target.closest('circle'); _cellsOff();
+  const k = c && c.getAttribute('data-k'); if (!k) return;
+  const cell = _tbl.querySelector(`td.cell[data-k="${k}"]`); if (cell) cell.classList.add('xhi'); });
+_chart.addEventListener('mouseleave', _cellsOff);
 // hover the legend bar -> highlight cells with >= the recall at the pointer position
 const _bar = document.getElementById('bar');
 _bar.addEventListener('mousemove', e => {
