@@ -36,6 +36,9 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   td.cell .sz { display:block; font-size:11px; font-weight:400; opacity:.6; }   /* bytes/vector, second line */
   td.cell.pareto { font-weight:900; }   /* pareto frontier (best recall per byte budget) — bold only */
   td.cell.pareto .sz { opacity:.85; }
+  /* among the highlighted (>= threshold) cells, the single best recall-per-byte — bright outline + glow */
+  td.cell.best { outline:2px solid #fff; outline-offset:-2px; box-shadow:0 0 12px 3px rgba(255,255,255,.9);
+                 filter:brightness(1.18); position:relative; z-index:2; }
   .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:13px; }
   .bar { width:220px; height:14px; border-radius:2px; cursor:crosshair;
          background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
@@ -88,7 +91,7 @@ function render() {
   for (const b of bits) {
     h += `<tr><th class=cor>${b}</th>` + dims.map(d => {
       const v = m[b + '_' + d];
-      return v==null ? '<td></td>' : `<td class="cell${pareto.has(b+'_'+d)?' pareto':''}" data-v="${v}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}<span class=sz>${bytesPerVec(b,d)}</span></td>`;
+      return v==null ? '<td></td>' : `<td class="cell${pareto.has(b+'_'+d)?' pareto':''}" data-v="${v}" data-bytes="${b*d/8}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}<span class=sz>${bytesPerVec(b,d)}</span></td>`;
     }).join('') + '</tr>';
   }
   h += '</table>';
@@ -102,8 +105,18 @@ render();
 // hover a cell -> fade every cell whose value is below it, so all cells with >= recall stay highlighted
 const _tbl = document.getElementById('tbl');
 const _legval = document.getElementById('legval');
-const applyThreshold = v => _tbl.querySelectorAll('td.cell').forEach(td => td.classList.toggle('dim', (+td.dataset.v) < v));
-const _clear = () => { _tbl.querySelectorAll('td.cell.dim').forEach(td => td.classList.remove('dim')); _legval.textContent = ''; };
+// dim cells below the threshold; among those at/above it, outline the single best recall-per-byte cell
+const applyThreshold = v => {
+  let best = null, bestRatio = -Infinity;
+  _tbl.querySelectorAll('td.cell').forEach(td => {
+    const val = +td.dataset.v;
+    td.classList.toggle('dim', val < v);
+    td.classList.remove('best');
+    if (val >= v) { const ratio = val / +td.dataset.bytes; if (ratio > bestRatio) { bestRatio = ratio; best = td; } }
+  });
+  if (best) best.classList.add('best');
+};
+const _clear = () => { _tbl.querySelectorAll('td.cell.dim,td.cell.best').forEach(td => td.classList.remove('dim','best')); _legval.textContent = ''; };
 // hover a cell -> highlight cells with >= its recall
 _tbl.addEventListener('mouseover', e => { const c = e.target.closest('td.cell'); if (!c) { _clear(); return; } applyThreshold(+c.dataset.v); });
 _tbl.addEventListener('mouseleave', _clear);
