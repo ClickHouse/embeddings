@@ -31,7 +31,8 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   th, td { padding:.28em .5em; text-align:center; font-variant-numeric:tabular-nums; font-size:12px; }
   th { color:#9a9a9a; font-weight:normal; }
   th.cor { color:#ffd54f; }
-  td.cell { color:#000; font-weight:600; min-width:40px; border:1px solid #111; }
+  td.cell { color:#000; font-weight:600; min-width:40px; border:1px solid #111; transition:opacity .08s; }
+  td.cell.dim { opacity:.15; }         /* on hover: cells below the pointed value fade, so >= cells stand out */
   .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:11px; }
   .bar { width:180px; height:12px; border-radius:2px;
          background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
@@ -72,7 +73,7 @@ function render() {
   for (const b of bits) {
     h += `<tr><th class=cor>${b}</th>` + dims.map(d => {
       const v = m[b + '_' + d];
-      return v==null ? '<td></td>' : `<td class=cell style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}</td>`;
+      return v==null ? '<td></td>' : `<td class=cell data-v="${v}" style="background:${color(v)}" title="bits=${b} dims=${d}">${v.toFixed(2)}</td>`;
     }).join('') + '</tr>';
   }
   h += '</table>';
@@ -83,6 +84,16 @@ buildSwitch(document.getElementById('sw-ty'), uniq('ty'), st.ty, k => { st.ty=k;
 buildSwitch(document.getElementById('sw-ro'), uniq('ro'), st.ro, k => { st.ro=k; render(); });
 buildSwitch(document.getElementById('sw-me'), Object.keys(METRICS), st.me, k => { st.me=k; render(); }, METRICS);
 render();
+// hover a cell -> fade every cell whose value is below it, so all cells with >= recall stay highlighted
+const _tbl = document.getElementById('tbl');
+const _clear = () => _tbl.querySelectorAll('td.cell.dim').forEach(td => td.classList.remove('dim'));
+_tbl.addEventListener('mouseover', e => {
+  const c = e.target.closest('td.cell');
+  if (!c) { _clear(); return; }
+  const v = +c.dataset.v;
+  _tbl.querySelectorAll('td.cell').forEach(td => td.classList.toggle('dim', (+td.dataset.v) < v));
+});
+_tbl.addEventListener('mouseleave', _clear);
 </script></body></html>
 '''
 open(os.path.join(BASE, 'site/recall.html'), 'w').write(HTML.replace('__DATA__', data))
