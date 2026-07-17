@@ -66,9 +66,10 @@
     #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
         background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
     a { color: #90caf9; }
-    /* About / attribution legend on the map */
-    .leaflet-control-attribution { background: rgba(0,0,0,.6); color: #bbb; font-size: 11px; padding: 2px 8px; }
-    .leaflet-control-attribution a { color: #ffd54f; }
+    /* About / attribution legend on the map (override Leaflet's higher-specificity white bg) */
+    .leaflet-control-attribution { background: rgba(0,0,0,.78) !important; color: #eee !important;
+        font-size: 12px; padding: 3px 10px; }
+    .leaflet-control-attribution a { color: #ffd54f !important; }
 </style>
 </head>
 <body>
