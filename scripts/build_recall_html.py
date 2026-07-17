@@ -34,7 +34,7 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   td.cell { color:#000; font-weight:600; min-width:44px; border:1px solid #111; transition:opacity .08s; line-height:1.15; }
   td.cell.dim { opacity:.15; }         /* on hover: cells below the pointed value fade, so >= cells stand out */
   td.cell .sz { display:block; font-size:9px; font-weight:400; opacity:.6; }   /* bytes/vector, second line */
-  td.cell.pareto { font-weight:900; box-shadow: inset 0 0 0 2px rgba(0,0,0,.65); }   /* pareto frontier (best recall per byte budget) */
+  td.cell.pareto { font-weight:900; }   /* pareto frontier (best recall per byte budget) — bold only */
   td.cell.pareto .sz { opacity:.85; }
   .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:11px; }
   .bar { width:220px; height:14px; border-radius:2px; cursor:crosshair;
