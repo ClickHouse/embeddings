@@ -71,6 +71,12 @@
     .leaflet-control-attribution { background: rgba(0,0,0,.78) !important; color: #eee !important;
         font-size: 12px; padding: 3px 10px; }
     .leaflet-control-attribution a { color: #ff0 !important; }
+    /* user-tag cloud for the current top-K results, pinned under the top panel over the map */
+    #tagcloud { position: absolute; left: 0; right: 0; z-index: 900; display: none;
+        background: rgba(15,15,15,.85); border-bottom: 1px solid #333; padding: .35em .6em .35em 52px;
+        max-height: 24vh; overflow-y: auto; line-height: 1.9; }   /* left pad clears the zoom control */
+    body.report-open #tagcloud { right: min(40%, 640px); }
+    #tagcloud .t { display: inline-block; margin: 0 .3em; white-space: nowrap; color: #9ccc65; }
 </style>
 </head>
 <body>
@@ -81,6 +87,7 @@
     <div class="grp"><label>mode</label><span id="modes"></span></div>
     <span id="status">ready</span>
 </div>
+<div id="tagcloud"></div>
 <div id="report"><div id="report-body"></div></div>
 <div id="full"><img id="full-img"></div>
 <img id="hover">
@@ -118,6 +125,8 @@ let repSeq = 0;                                             /// guards a slow qu
 let repAbort = null;                                        /// aborts a still-running scan when switching
 let repTarget = 0;      /// desired # of result images (grows 2x on scroll)
 let repLoaded = 0;      /// # of result images currently shown
+let repMd5s = [];       /// md5s of the current top-K results (for the user-tag cloud)
+let tagSeq = 0;         /// guards stale tag-cloud responses
 let repLoading = false; /// a scan is in flight (guards scroll-triggered load-more)
 let repMore = true;     /// more results may exist (the last batch was full)
 const MAX_RESULTS = 3000;   /// safety cap on rendered thumbnails
@@ -476,6 +485,36 @@ function switchRep() {
     updateURL();
 }
 /// Run the similarity scan. more=false rebuilds the grid to the top-`repTarget`; more=true appends
+/// Fetch user_tags for the current top-K results and render a frequency-sized tag cloud over the map.
+async function updateTagCloud() {
+    const el = document.getElementById('tagcloud');
+    const md5s = repMd5s.slice(0, 1000);
+    if (!reportActive || !md5s.length) { el.style.display = 'none'; return; }
+    const seq = ++tagSeq;
+    const inlist = md5s.map(m => `'${m}'`).join(',');   /// md5s are hex (stupidHex) -> safe to inline
+    const sql = `SELECT tag, count() c FROM (SELECT arrayJoin(user_tags) tag
+        FROM mmcommons.tags_by_md5 WHERE md5 IN (${inlist})) GROUP BY tag ORDER BY c DESC, tag LIMIT 60 FORMAT JSONCompactEachRow`;
+    try {
+        const resp = await fetch(chURL('enable_parallel_replicas=0'), { method: 'POST', body: sql });  /// PK seek on md5 -> no PR
+        if (!resp.ok) throw new Error(await resp.text());
+        const txt = await resp.text();
+        if (seq !== tagSeq || !reportActive) return;    /// a newer results set superseded this
+        const tags = txt.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));   /// [tag, count]
+        if (!tags.length) { el.style.display = 'none'; return; }
+        const max = tags[0][1], min = tags[tags.length - 1][1];
+        el.replaceChildren();
+        for (const [t, c] of tags) {                    /// size + brightness by frequency
+            const f = max > min ? (c - min) / (max - min) : 1;
+            const s = document.createElement('span');
+            s.className = 't'; s.textContent = t; s.title = `${c} image${c === 1 ? '' : 's'}`;
+            s.style.fontSize = (11 + f * 17).toFixed(1) + 'px';
+            s.style.opacity = (0.55 + 0.45 * f).toFixed(2);
+            el.appendChild(s);
+        }
+        el.style.top = document.getElementById('panel').offsetHeight + 'px';
+        el.style.display = 'block';
+    } catch (e) { if (seq === tagSeq) el.style.display = 'none'; }
+}
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
 async function runSimilar(more) {
     const table = curTable(), col = qbitInfo().col, md5 = curReport;
@@ -541,6 +580,7 @@ async function runSimilar(more) {
             for (const r of rows) grid.appendChild(thumbImg(r.md5, false));   /// append the next page (keeps scroll position)
             addOverlayThumbs(rows);                                           /// and place them on the map
             repLoaded += rows.length;
+            for (const r of rows) repMd5s.push(r.md5);
         } else {
             const next = [thumbImg(md5, true)];                            /// rebuild: query thumb + results
             for (const r of rows) next.push(thumbImg(r.md5, false));
@@ -548,7 +588,9 @@ async function runSimilar(more) {
             grid.classList.remove('loading');
             clearOverlay(); addOverlayThumbs(rows);                        /// refresh the on-map overlay
             repLoaded = rows.length;
+            repMd5s = rows.map(r => r.md5);
         }
+        updateTagCloud();                                                  /// refresh the user-tag cloud over the map
         repMore = rows.length === cnt && repLoaded < MAX_RESULTS;          /// full batch -> more may exist
         hideError();
         document.getElementById('rc-title').textContent = `Top-${repLoaded} similar`;
@@ -598,6 +640,7 @@ function hidePreview() { document.getElementById('full').style.display = 'none';
 function hideReport() {
     document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
     reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
+    repMd5s = []; tagSeq++; document.getElementById('tagcloud').style.display = 'none';   /// clear the tag cloud
     if (mode === 'thumbs') redraw();                         /// restore the thumbnail tiles
     updateURL();
 }
