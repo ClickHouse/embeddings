@@ -37,8 +37,9 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   td.cell.pareto { font-weight:900; box-shadow: inset 0 0 0 2px rgba(0,0,0,.65); }   /* pareto frontier (best recall per byte budget) */
   td.cell.pareto .sz { opacity:.85; }
   .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:11px; }
-  .bar { width:180px; height:12px; border-radius:2px;
+  .bar { width:220px; height:14px; border-radius:2px; cursor:crosshair;
          background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
+  .legval { color:#ffd54f; font-family:monospace; min-width:4em; }
 </style></head><body>
 <h1>QBit representation recall &mdash; bits &times; dims heatmap</h1>
 <div class=sub>100k-row sample per dataset, 20 random queries, exact-cosine ground truth. Green = 1.0, red = 0.0.</div>
@@ -49,7 +50,7 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   <div><label>metric</label><span id=sw-me></span></div>
 </div>
 <div id=tbl></div>
-<div class=legend>0.0 <span class=bar></span> 1.0</div>
+<div class=legend>0.0 <span class=bar id=bar></span> 1.0 <span id=legval class=legval></span></div>
 <script>
 const DATA = __DATA__;
 const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'Recall 10-in-100' };
@@ -100,14 +101,20 @@ buildSwitch(document.getElementById('sw-me'), Object.keys(METRICS), st.me, k => 
 render();
 // hover a cell -> fade every cell whose value is below it, so all cells with >= recall stay highlighted
 const _tbl = document.getElementById('tbl');
-const _clear = () => _tbl.querySelectorAll('td.cell.dim').forEach(td => td.classList.remove('dim'));
-_tbl.addEventListener('mouseover', e => {
-  const c = e.target.closest('td.cell');
-  if (!c) { _clear(); return; }
-  const v = +c.dataset.v;
-  _tbl.querySelectorAll('td.cell').forEach(td => td.classList.toggle('dim', (+td.dataset.v) < v));
-});
+const _legval = document.getElementById('legval');
+const applyThreshold = v => _tbl.querySelectorAll('td.cell').forEach(td => td.classList.toggle('dim', (+td.dataset.v) < v));
+const _clear = () => { _tbl.querySelectorAll('td.cell.dim').forEach(td => td.classList.remove('dim')); _legval.textContent = ''; };
+// hover a cell -> highlight cells with >= its recall
+_tbl.addEventListener('mouseover', e => { const c = e.target.closest('td.cell'); if (!c) { _clear(); return; } applyThreshold(+c.dataset.v); });
 _tbl.addEventListener('mouseleave', _clear);
+// hover the legend bar -> highlight cells with >= the recall at the pointer position
+const _bar = document.getElementById('bar');
+_bar.addEventListener('mousemove', e => {
+  const r = _bar.getBoundingClientRect();
+  const v = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  applyThreshold(v); _legval.textContent = '≥ ' + v.toFixed(2);
+});
+_bar.addEventListener('mouseleave', _clear);
 </script></body></html>
 '''
 open(os.path.join(BASE, 'site/recall.html'), 'w').write(HTML.replace('__DATA__', data))
