@@ -66,6 +66,9 @@
     #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
         background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
     a { color: #90caf9; }
+    /* About / attribution legend on the map */
+    .leaflet-control-attribution { background: rgba(0,0,0,.6); color: #bbb; font-size: 11px; padding: 2px 8px; }
+    .leaflet-control-attribution a { color: #ffd54f; }
 </style>
 </head>
 <body>
@@ -245,7 +248,10 @@ function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}
 
 /// ---- Map ----
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 22,
-    zoomControl: true, attributionControl: false });
+    zoomControl: true, attributionControl: true });
+/// About / attribution legend (bottom-right of the map; moves with the map when the report panel opens)
+map.attributionControl.setPrefix(false).addAttribution(
+    '<a href="https://github.com/ClickHouse/embeddings" target="_blank" rel="noopener">About</a> | © Alexey Milovidov, ClickHouse, Inc. (data: Multimedia Commons, CC Licenses)');
 /// world = the 2^32 data plane (crs pixels [0,TILE] at zoom 0)
 const worldBounds = L.latLngBounds(map.unproject([0, TILE], 0), map.unproject([TILE, 0], 0));
 map.setMaxBounds(worldBounds.pad(0.3));

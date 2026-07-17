@@ -55,6 +55,8 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   /* cross-highlight: hovering a dot marks its table cell (.xhi); hovering a cell marks its dot(s) (.hi) */
   td.cell.xhi { outline:2px solid #29b6f6; outline-offset:-2px; box-shadow:0 0 10px 2px rgba(41,182,246,.85); filter:brightness(1.12); position:relative; z-index:3; }
   svg.chart circle.hi { r:6; stroke:#29b6f6; stroke-width:2.5; opacity:1; }
+  .foot { margin-top:2.2em; color:#888; font-size:13px; }
+  .foot a { color:#ffd54f; }
 </style></head><body>
 <h1>QBit representation recall &mdash; bits &times; dims heatmap</h1>
 <div class=sub>per-dataset random sample (selectable), 20 random queries, exact-cosine ground truth. Green = 1.0, red = 0.0.</div>
@@ -71,6 +73,7 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   <div class=csub>best achievable recall vs. size &mdash; line = pareto frontier, dots = all configs (color = recall)</div>
   <div id=chart></div>
 </div>
+<div class=foot><a href="https://github.com/ClickHouse/embeddings" target=_blank rel=noopener>About</a> | &copy; Alexey Milovidov, ClickHouse, Inc. (data: Multimedia Commons, CC Licenses)</div>
 <script>
 const DATA = __DATA__;
 const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'Recall 10-in-100' };
