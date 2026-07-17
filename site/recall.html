@@ -94,23 +94,25 @@ function render() {
   h += '</table>';
   document.getElementById('tbl').innerHTML = h;
 
-  // ---- pareto chart: best recall (y) vs bytes/vector (x, log scale) ----
+  // ---- pareto chart: best recall (y) vs bytes/vector (x, log scale). NB: all SVG attrs MUST be
+  //      quoted — an unquoted value before a self-closing "/>" swallows the slash (y2="316/") ----
   const P = rows.map(r => ({b:r.b, d:r.d, bytes:r.b*r.d/8, v:r[st.me], pa:pareto.has(r.b+'_'+r.d)}));
   const CW=680, CH=360, ML=54, MR=18, MT=16, MB=44, IW=CW-ML-MR, IH=CH-MT-MB;
   const bs = P.map(p=>p.bytes), lo=Math.log2(Math.min(...bs)), hi=Math.log2(Math.max(...bs)), spanx=(hi-lo)||1;
-  const X = by => ML + (Math.log2(by)-lo)/spanx*IW;
-  const Y = v  => MT + (1-v)*IH;
-  let g = `<svg viewBox="0 0 ${CW} ${CH}" class=chart>`;
-  for (let t=0;t<=10;t+=2){ const yy=Y(t/10).toFixed(1);                                    // y grid + labels
-    g += `<line class=grid x1=${ML} y1=${yy} x2=${CW-MR} y2=${yy}/><text class=ax x=${ML-6} y=${(+yy+3).toFixed(1)} text-anchor=end>${(t/10).toFixed(1)}</text>`; }
-  for (let e=Math.ceil(lo); e<=Math.floor(hi); e++){ const by=2**e, xx=X(by).toFixed(1);     // x grid + labels (powers of two bytes)
-    g += `<line class=grid x1=${xx} y1=${MT} x2=${xx} y2=${MT+IH}/><text class=ax x=${xx} y=${MT+IH+16} text-anchor=middle>${fmtB(by)}</text>`; }
-  P.forEach(p => g += `<circle cx=${X(p.bytes).toFixed(1)} cy=${Y(p.v).toFixed(1)} r=2.4 fill="${color(p.v)}" opacity=.45><title>${p.b}bit &times; ${p.d}d · ${fmtB(p.bytes)} · ${p.v.toFixed(3)}</title></circle>`);
-  const fr = P.filter(p=>p.pa).sort((a,b)=>a.bytes-b.bytes);                                  // pareto frontier line + dots
-  g += `<polyline class=front points="${fr.map(p=>X(p.bytes).toFixed(1)+','+Y(p.v).toFixed(1)).join(' ')}"/>`;
-  fr.forEach(p => g += `<circle cx=${X(p.bytes).toFixed(1)} cy=${Y(p.v).toFixed(1)} r=4 fill="${color(p.v)}" stroke=#fff stroke-width=1.5><title>${p.b}bit &times; ${p.d}d · ${fmtB(p.bytes)} · ${p.v.toFixed(3)}</title></circle>`);
-  g += `<text class=axt x=${ML+IW/2} y=${CH-4} text-anchor=middle>bytes / vector (log)</text>`;
-  g += `<text class=axt transform="translate(14,${MT+IH/2}) rotate(-90)" text-anchor=middle>${METRICS[st.me]}</text></svg>`;
+  const X = by => (ML + (Math.log2(by)-lo)/spanx*IW).toFixed(1);
+  const Y = v  => (MT + (1-v)*IH).toFixed(1);
+  const tip = p => `<title>${p.b}bit &#215; ${p.d}d &#183; ${fmtB(p.bytes)} &#183; ${p.v.toFixed(3)}</title>`;
+  let g = `<svg viewBox="0 0 ${CW} ${CH}" class="chart">`;
+  for (let t=0;t<=10;t+=2){ const yy=Y(t/10);                                                       // y grid + labels
+    g += `<line class="grid" x1="${ML}" y1="${yy}" x2="${CW-MR}" y2="${yy}"/><text class="ax" x="${ML-6}" y="${+yy+3}" text-anchor="end">${(t/10).toFixed(1)}</text>`; }
+  for (let e=Math.ceil(lo); e<=Math.floor(hi); e++){ const by=2**e, xx=X(by);                        // x grid + labels (powers of two bytes)
+    g += `<line class="grid" x1="${xx}" y1="${MT}" x2="${xx}" y2="${MT+IH}"/><text class="ax" x="${xx}" y="${MT+IH+16}" text-anchor="middle">${fmtB(by)}</text>`; }
+  P.forEach(p => g += `<circle cx="${X(p.bytes)}" cy="${Y(p.v)}" r="2.4" fill="${color(p.v)}" opacity="0.45">${tip(p)}</circle>`);
+  const fr = P.filter(p=>p.pa).sort((a,b)=>a.bytes-b.bytes);                                          // pareto frontier line + dots
+  g += `<polyline class="front" points="${fr.map(p=>X(p.bytes)+','+Y(p.v)).join(' ')}"/>`;
+  fr.forEach(p => g += `<circle cx="${X(p.bytes)}" cy="${Y(p.v)}" r="4" fill="${color(p.v)}" stroke="#fff" stroke-width="1.5">${tip(p)}</circle>`);
+  g += `<text class="axt" x="${ML+IW/2}" y="${CH-4}" text-anchor="middle">bytes / vector (log)</text>`;
+  g += `<text class="axt" transform="translate(14,${MT+IH/2}) rotate(-90)" text-anchor="middle">${METRICS[st.me]}</text></svg>`;
   document.getElementById('chart').innerHTML = g;
 }
 buildSwitch(document.getElementById('sw-ds'), uniq('ds'), st.ds, k => { st.ds=k; render(); });
