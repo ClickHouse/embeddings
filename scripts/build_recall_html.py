@@ -6,7 +6,8 @@ rows = []
 for r in csv.DictReader(open(os.path.join(BASE, 'results/recall.csv'))):
     if not r['recall100']:
         continue
-    rows.append({'ds': r['dataset'].replace('emb_', ''), 'ty': r['type'], 'ro': r['rotation'],
+    rows.append({'sa': r.get('sample', '100k'),
+                 'ds': r['dataset'].replace('emb_', ''), 'ty': r['type'], 'ro': r['rotation'],
                  'b': int(r['bits']), 'd': int(r['dims']),
                  'recall10': float(r['recall10']), 'recall100': float(r['recall100']),
                  'recall10in100': float(r['recall10in100'])})
@@ -56,8 +57,9 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   svg.chart circle.hi { r:6; stroke:#29b6f6; stroke-width:2.5; opacity:1; }
 </style></head><body>
 <h1>QBit representation recall &mdash; bits &times; dims heatmap</h1>
-<div class=sub>100k-row sample per dataset, 20 random queries, exact-cosine ground truth. Green = 1.0, red = 0.0.</div>
+<div class=sub>per-dataset random sample (selectable), 20 random queries, exact-cosine ground truth. Green = 1.0, red = 0.0.</div>
 <div class=ctl>
+  <div><label>sample</label><span id=sw-sa></span></div>
   <div><label>dataset</label><span id=sw-ds></span></div>
   <div><label>type</label><span id=sw-ty></span></div>
   <div><label>rotation</label><span id=sw-ro></span></div>
@@ -72,7 +74,10 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
 <script>
 const DATA = __DATA__;
 const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'Recall 10-in-100' };
-let st = { ds:'siglip2', ty:'Int8', ro:'rotated', me:'recall100' };
+const SAMPLES = { '100k':'100k', '1m':'1M', '10m':'10M', 'full':'full' };   // sample-size labels, small->large
+const SORDER = Object.keys(SAMPLES);
+const samplesAvail = [...new Set(DATA.map(r => r.sa))].sort((a,b)=>SORDER.indexOf(a)-SORDER.indexOf(b));
+let st = { sa: samplesAvail[samplesAvail.length-1], ds:'siglip2', ty:'Int8', ro:'rotated', me:'recall100' };
 const uniq = k => [...new Set(DATA.map(r => r[k]))];
 const color = v => v==null ? '#222' : `hsl(${(v*120).toFixed(0)},75%,50%)`;
 const fmtB = n => n < 1024 ? n+'B' : (n/1024).toFixed(1).replace(/\.0$/,'')+'K';
@@ -88,7 +93,7 @@ function buildSwitch(el, keys, cur, onPick, labels) {
   });
 }
 function render() {
-  const rows = DATA.filter(r => r.ds===st.ds && r.ty===st.ty && r.ro===st.ro);
+  const rows = DATA.filter(r => r.sa===st.sa && r.ds===st.ds && r.ty===st.ty && r.ro===st.ro);
   const bits = [...new Set(rows.map(r => r.b))].sort((a,b)=>a-b);
   const dims = [...new Set(rows.map(r => r.d))].sort((a,b)=>a-b);
   const m = {}; rows.forEach(r => m[r.b + '_' + r.d] = r[st.me]);
@@ -102,7 +107,7 @@ function render() {
     for (let k=ci; k<j; k++) if (cells[k].v > runMax) runMax = cells[k].v;
     ci = j;
   }
-  let h = `<table><caption>${st.ds} &middot; ${st.ty} &middot; ${st.ro} &middot; ${METRICS[st.me]}</caption>`;
+  let h = `<table><caption>${st.ds} &middot; ${st.ty} &middot; ${st.ro} &middot; ${METRICS[st.me]} &middot; ${SAMPLES[st.sa]||st.sa} sample</caption>`;
   h += '<tr><th class=cor>bits&nbsp;\\&nbsp;dims</th>' + dims.map(d => `<th>${d}</th>`).join('') + '</tr>';
   for (const b of bits) {
     h += `<tr><th class=cor>${b}</th>` + dims.map(d => {
@@ -135,6 +140,7 @@ function render() {
   document.getElementById('chart').innerHTML = g;
   alignLeft();
 }
+buildSwitch(document.getElementById('sw-sa'), samplesAvail, st.sa, k => { st.sa=k; render(); }, SAMPLES);
 buildSwitch(document.getElementById('sw-ds'), uniq('ds'), st.ds, k => { st.ds=k; render(); });
 buildSwitch(document.getElementById('sw-ty'), uniq('ty'), st.ty, k => { st.ty=k; render(); });
 buildSwitch(document.getElementById('sw-ro'), uniq('ro'), st.ro, k => { st.ro=k; render(); });
