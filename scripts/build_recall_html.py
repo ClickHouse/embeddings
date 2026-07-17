@@ -43,6 +43,13 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   .bar { width:220px; height:14px; border-radius:2px; cursor:crosshair;
          background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
   .legval { color:#ffd54f; font-family:monospace; min-width:4em; }
+  .chartwrap { margin-top:1.6em; }
+  .csub { color:#8bc34a; font-family:monospace; font-size:13px; margin-bottom:.35em; }
+  svg.chart { width:100%; max-width:720px; height:auto; background:#181818; border-radius:4px; }
+  svg.chart .grid { stroke:#333; stroke-width:1; }
+  svg.chart .ax   { fill:#888; font-size:11px; font-family:monospace; }
+  svg.chart .axt  { fill:#aaa; font-size:12px; }
+  svg.chart .front{ fill:none; stroke:#ffd54f; stroke-width:2; }
 </style></head><body>
 <h1>QBit representation recall &mdash; bits &times; dims heatmap</h1>
 <div class=sub>100k-row sample per dataset, 20 random queries, exact-cosine ground truth. Green = 1.0, red = 0.0.</div>
@@ -54,13 +61,18 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
 </div>
 <div id=tbl></div>
 <div class=legend>0.0 <span class=bar id=bar></span> 1.0 <span id=legval class=legval></span></div>
+<div class=chartwrap>
+  <div class=csub>best achievable recall vs. size &mdash; line = pareto frontier, dots = all configs (color = recall)</div>
+  <div id=chart></div>
+</div>
 <script>
 const DATA = __DATA__;
 const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'Recall 10-in-100' };
 let st = { ds:'siglip2', ty:'Int8', ro:'rotated', me:'recall100' };
 const uniq = k => [...new Set(DATA.map(r => r[k]))];
 const color = v => v==null ? '#222' : `hsl(${(v*120).toFixed(0)},75%,50%)`;
-const bytesPerVec = (b,d) => { const n = b*d/8; return n < 1024 ? n+'B' : (n/1024).toFixed(1).replace(/\.0$/,'')+'K'; };
+const fmtB = n => n < 1024 ? n+'B' : (n/1024).toFixed(1).replace(/\.0$/,'')+'K';
+const bytesPerVec = (b,d) => fmtB(b*d/8);
 function buildSwitch(el, keys, cur, onPick, labels) {
   el.innerHTML = '';
   keys.forEach(k => {
@@ -96,6 +108,25 @@ function render() {
   }
   h += '</table>';
   document.getElementById('tbl').innerHTML = h;
+
+  // ---- pareto chart: best recall (y) vs bytes/vector (x, log scale) ----
+  const P = rows.map(r => ({b:r.b, d:r.d, bytes:r.b*r.d/8, v:r[st.me], pa:pareto.has(r.b+'_'+r.d)}));
+  const CW=680, CH=360, ML=54, MR=18, MT=16, MB=44, IW=CW-ML-MR, IH=CH-MT-MB;
+  const bs = P.map(p=>p.bytes), lo=Math.log2(Math.min(...bs)), hi=Math.log2(Math.max(...bs)), spanx=(hi-lo)||1;
+  const X = by => ML + (Math.log2(by)-lo)/spanx*IW;
+  const Y = v  => MT + (1-v)*IH;
+  let g = `<svg viewBox="0 0 ${CW} ${CH}" class=chart>`;
+  for (let t=0;t<=10;t+=2){ const yy=Y(t/10).toFixed(1);                                    // y grid + labels
+    g += `<line class=grid x1=${ML} y1=${yy} x2=${CW-MR} y2=${yy}/><text class=ax x=${ML-6} y=${(+yy+3).toFixed(1)} text-anchor=end>${(t/10).toFixed(1)}</text>`; }
+  for (let e=Math.ceil(lo); e<=Math.floor(hi); e++){ const by=2**e, xx=X(by).toFixed(1);     // x grid + labels (powers of two bytes)
+    g += `<line class=grid x1=${xx} y1=${MT} x2=${xx} y2=${MT+IH}/><text class=ax x=${xx} y=${MT+IH+16} text-anchor=middle>${fmtB(by)}</text>`; }
+  P.forEach(p => g += `<circle cx=${X(p.bytes).toFixed(1)} cy=${Y(p.v).toFixed(1)} r=2.4 fill="${color(p.v)}" opacity=.45><title>${p.b}bit &times; ${p.d}d · ${fmtB(p.bytes)} · ${p.v.toFixed(3)}</title></circle>`);
+  const fr = P.filter(p=>p.pa).sort((a,b)=>a.bytes-b.bytes);                                  // pareto frontier line + dots
+  g += `<polyline class=front points="${fr.map(p=>X(p.bytes).toFixed(1)+','+Y(p.v).toFixed(1)).join(' ')}"/>`;
+  fr.forEach(p => g += `<circle cx=${X(p.bytes).toFixed(1)} cy=${Y(p.v).toFixed(1)} r=4 fill="${color(p.v)}" stroke=#fff stroke-width=1.5><title>${p.b}bit &times; ${p.d}d · ${fmtB(p.bytes)} · ${p.v.toFixed(3)}</title></circle>`);
+  g += `<text class=axt x=${ML+IW/2} y=${CH-4} text-anchor=middle>bytes / vector (log)</text>`;
+  g += `<text class=axt transform="translate(14,${MT+IH/2}) rotate(-90)" text-anchor=middle>${METRICS[st.me]}</text></svg>`;
+  document.getElementById('chart').innerHTML = g;
 }
 buildSwitch(document.getElementById('sw-ds'), uniq('ds'), st.ds, k => { st.ds=k; render(); });
 buildSwitch(document.getElementById('sw-ty'), uniq('ty'), st.ty, k => { st.ty=k; render(); });
