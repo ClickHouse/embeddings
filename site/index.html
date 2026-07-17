@@ -16,22 +16,22 @@
     .leaflet-top { margin-top: 42px; }
     /* point-cloud hover: nearest-image thumbnail shown under the cursor after a short dwell */
     #hover { position: absolute; width: 75px; height: 75px; z-index: 1001; pointer-events: none;
-        display: none; image-rendering: pixelated; border: 2px solid #ffd54f; background: #222;
+        display: none; image-rendering: pixelated; border: 2px solid #ff0; background: #222;
         box-shadow: 0 0 12px #000; }
     /* top-K result thumbnails overlaid on the point cloud, centered on each image's (x,y) point */
     .topk-marker { background: none; border: 0; }
     .topk-marker img { box-sizing: border-box; display: block; image-rendering: pixelated;
-        border: 1px solid rgba(255,213,79,.9); box-shadow: 0 0 5px #000; cursor: pointer; }
+        border: 1px solid rgba(255,255,0,.9); box-shadow: 0 0 5px #000; cursor: pointer; }
     .topk-marker img.loading { width: 0 !important; height: 0 !important; border: 0 !important; box-shadow: none !important; }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
         padding: .4em .6em; background: rgba(20,20,20,.88); font-size: 13px; }
-    #panel b { color: #ffd54f; }
+    #panel b { color: #ff0; }
     .grp { display: flex; gap: .15em; align-items: center; }
     .grp label { color: #999; margin-right: .25em; }
     .opt { padding: .2em .5em; background: #333; border: 1px solid #000; cursor: pointer; user-select: none; }
-    .opt:hover { background: #ffd54f; color: #000; }
+    .opt:hover { background: #ff0; color: #000; }
     .opt.sel { background: #fff; color: #000; }
     #status { margin-left: auto; color: #8bc34a; font-family: monospace; }
     #report { position: absolute; top: 0; right: 0; bottom: 0; width: 40%; max-width: 640px;
@@ -40,12 +40,12 @@
     /* sticky top-K header: title + controls + progress stay put while the grid scrolls under it */
     #rep-head { position: sticky; top: 0; z-index: 5; background: #101010;
         padding: .5em .6em .4em; box-shadow: 0 3px 10px rgba(0,0,0,.55); }
-    #report h3 { margin: .2em 0 .4em; color: #ffd54f; }
+    #report h3 { margin: .2em 0 .4em; color: #ff0; }
     #report .close { float: right; cursor: pointer; color: #f66; font-size: 18px; }
     #grid { display: grid; grid-template-columns: repeat(auto-fill, 75px); gap: 3px; padding: .5em .6em .6em; }
     #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
         border: 1px solid #333; background: #222; transition: filter .15s; }
-    #grid img:hover { border-color: #ffd54f; }
+    #grid img:hover { border-color: #ff0; }
     /* while a new representation loads, keep the old pictures but dim them to 50% for visual diff */
     #grid.loading img { filter: brightness(.5); }
     .repctl { display: flex; flex-wrap: wrap; gap: .3em 1.2em; margin: .5em 0; align-items: center; }
@@ -57,19 +57,19 @@
     #rep-progress { height: 8px; background: #222; border: 1px solid #333; border-radius: 4px;
         overflow: hidden; margin: .2em 0 .4em; display: none; }
     #rep-progress > div { height: 100%; width: 0; transition: width .15s ease-out;
-        background: linear-gradient(90deg, #8bc34a, #ffd54f); }
+        background: linear-gradient(90deg, #8bc34a, #ff0); }
     /* non-modal full-size preview shown on hover, pinned to the bottom-left corner */
     #full { position: absolute; left: 10px; bottom: 10px; z-index: 1003;
         display: none; pointer-events: none; }
     #full img { max-width: 42vw; max-height: 66vh; box-shadow: 0 0 40px #000;
-        border: 2px solid #ffd54f; background: #000; }
+        border: 2px solid #ff0; background: #000; }
     #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
         background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
     a { color: #90caf9; }
     /* About / attribution legend on the map (override Leaflet's higher-specificity white bg) */
     .leaflet-control-attribution { background: rgba(0,0,0,.78) !important; color: #eee !important;
         font-size: 12px; padding: 3px 10px; }
-    .leaflet-control-attribution a { color: #ffd54f !important; }
+    .leaflet-control-attribution a { color: #ff0 !important; }
 </style>
 </head>
 <body>
@@ -582,7 +582,7 @@ function thumbImg(md5, isQuery) {
     const img = document.createElement('img');
     img.src = thumbURL(md5);
     img.title = isQuery ? 'query · hover to preview' : md5 + ' · click to search from here';
-    if (isQuery) img.style.borderColor = '#ffd54f';
+    if (isQuery) img.style.borderColor = '#ff0';
     else img.onclick = () => showReport(md5);
     img.onmouseenter = () => previewImg(md5);
     img.onmouseleave = hidePreview;
