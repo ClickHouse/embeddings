@@ -649,7 +649,11 @@ buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
     updateURL();
 });
-buildSwitch('modes', ['points', 'thumbs'], mode, k => { mode = k; hideHover(); redraw(); updateURL(); });
+buildSwitch('modes', ['points', 'thumbs'], mode, k => {
+    mode = k;
+    if (k === 'thumbs' && reportActive) hideReport();   /// thumbs mode has no top-K panel — close it on switch
+    hideHover(); redraw(); updateURL();
+});
 
 /// offset the Leaflet top controls below the (variable-height, wrappable) header bar
 function offsetControls() {
