@@ -19,19 +19,19 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
 <title>QBit recall heatmap</title>
 <style>
   body { background:#111; color:#ddd; font:16px system-ui,-apple-system,sans-serif; margin:0; padding:1em 1.2em; }
-  h1 { font-size:19px; color:#ffd54f; margin:.2em 0 .1em; }
+  h1 { font-size:19px; color:#ff0; margin:.2em 0 .1em; }
   .sub { color:#888; font-size:14px; margin-bottom:.6em; }
   .ctl { display:flex; flex-wrap:wrap; gap:.35em 1.4em; align-items:center; margin:.5em 0 1em; }
   .ctl > div { display:flex; align-items:center; gap:.3em; }
   .ctl label { color:#999; font-size:13px; text-transform:uppercase; letter-spacing:.04em; }
   .opt { padding:.16em .55em; background:#2b2b2b; border:1px solid #000; cursor:pointer; user-select:none; font-size:14px; border-radius:3px; }
-  .opt:hover { background:#ffd54f; color:#000; }
+  .opt:hover { background:#ff0; color:#000; }
   .opt.sel { background:#fff; color:#000; }
   table { border-collapse:collapse; }
   caption { caption-side:top; text-align:left; color:#8bc34a; font-family:monospace; margin-bottom:.45em; }
   th, td { padding:.28em .5em; text-align:center; font-variant-numeric:tabular-nums; font-size:14px; }
   th { color:#9a9a9a; font-weight:normal; }
-  th.cor { color:#ffd54f; }
+  th.cor { color:#ff0; }
   td.cell { color:#000; font-weight:600; min-width:44px; border:1px solid #111; transition:opacity .08s; line-height:1.15; }
   td.cell.dim { opacity:.15; }         /* on hover: cells below the pointed value fade, so >= cells stand out */
   td.cell .sz { display:block; font-size:11px; font-weight:400; opacity:.6; }   /* bytes/vector, second line */
@@ -43,20 +43,20 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
   .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:13px; }
   .bar { width:220px; height:14px; border-radius:2px; cursor:crosshair;
          background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
-  .legval { color:#ffd54f; font-family:monospace; min-width:4em; }
+  .legval { color:#ff0; font-family:monospace; min-width:4em; }
   .chartwrap { margin-top:1.6em; }
   .csub { color:#8bc34a; font-family:monospace; font-size:13px; margin-bottom:.35em; }
   svg.chart { width:100%; max-width:720px; height:auto; background:#181818; border-radius:4px; }
   svg.chart .grid { stroke:#333; stroke-width:1; }
   svg.chart .ax   { fill:#888; font-size:11px; font-family:monospace; }
   svg.chart .axt  { fill:#aaa; font-size:12px; }
-  svg.chart .front{ fill:none; stroke:#ffd54f; stroke-width:2; }
+  svg.chart .front{ fill:none; stroke:#ff0; stroke-width:2; }
   svg.chart .dot  { cursor:pointer; }
   /* cross-highlight: hovering a dot marks its table cell (.xhi); hovering a cell marks its dot(s) (.hi) */
   td.cell.xhi { outline:2px solid #29b6f6; outline-offset:-2px; box-shadow:0 0 10px 2px rgba(41,182,246,.85); filter:brightness(1.12); position:relative; z-index:3; }
   svg.chart circle.hi { r:6; stroke:#29b6f6; stroke-width:2.5; opacity:1; }
   .foot { margin-top:2.2em; color:#888; font-size:13px; }
-  .foot a { color:#ffd54f; }
+  .foot a { color:#ff0; }
 </style></head><body>
 <h1>QBit representation recall &mdash; bits &times; dims heatmap</h1>
 <div class=sub>per-dataset random sample (selectable), 20 random queries, exact-cosine ground truth. Green = 1.0, red = 0.0.</div>
@@ -77,7 +77,7 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
 <script>
 const DATA = __DATA__;
 const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'Recall 10-in-100' };
-const SAMPLES = { '100k':'100k', '1m':'1M', '10m':'10M', 'full':'full' };   // sample-size labels, small->large
+const SAMPLES = { '100k':'100k', '1m':'1M', '10m':'10M', 'full':'100M' };   // sample-size labels, small->large
 const SORDER = Object.keys(SAMPLES);
 const samplesAvail = [...new Set(DATA.map(r => r.sa))].sort((a,b)=>SORDER.indexOf(a)-SORDER.indexOf(b));
 let st = { sa: samplesAvail[samplesAvail.length-1], ds:'siglip2', ty:'Int8', ro:'rotated', me:'recall100' };
