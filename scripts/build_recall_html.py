@@ -132,8 +132,12 @@ function render() {
   for (let e=Math.ceil(lo); e<=Math.floor(hi); e++){ const by=2**e, xx=X(by);                        // x grid + labels (powers of two bytes)
     g += `<line class="grid" x1="${xx}" y1="${MT}" x2="${xx}" y2="${MT+IH}"/><text class="ax" x="${xx}" y="${MT+IH+16}" text-anchor="middle">${fmtB(by)}</text>`; }
   P.forEach(p => g += `<circle class="dot" data-k="${p.b}_${p.d}" cx="${X(p.bytes)}" cy="${Y(p.v)}" r="2.4" fill="${color(p.v)}" opacity="0.45">${tip(p)}</circle>`);
-  const fr = P.filter(p=>p.pa).sort((a,b)=>a.bytes-b.bytes);                                          // pareto frontier line + dots
-  g += `<polyline class="front" points="${fr.map(p=>X(p.bytes)+','+Y(p.v)).join(' ')}"/>`;
+  const fr = P.filter(p=>p.pa).sort((a,b)=>a.bytes-b.bytes);                                          // pareto frontier dots
+  // frontier LINE: skip dots that share a horizontal position (same bytes) — go through the highest one
+  const byBytes = new Map();
+  fr.forEach(p => { const c = byBytes.get(p.bytes); if (!c || p.v > c.v) byBytes.set(p.bytes, p); });
+  const frLine = [...byBytes.values()].sort((a,b)=>a.bytes-b.bytes);
+  g += `<polyline class="front" points="${frLine.map(p=>X(p.bytes)+','+Y(p.v)).join(' ')}"/>`;
   fr.forEach(p => g += `<circle class="dot pdot" data-k="${p.b}_${p.d}" cx="${X(p.bytes)}" cy="${Y(p.v)}" r="4" fill="${color(p.v)}" stroke="#fff" stroke-width="1.5">${tip(p)}</circle>`);
   g += `<text class="axt" x="${ML+IW/2}" y="${CH-4}" text-anchor="middle">bytes / vector (log)</text>`;
   g += `<text class="axt" transform="translate(14,${MT+IH/2}) rotate(-90)" text-anchor="middle">${METRICS[st.me]}</text></svg>`;
