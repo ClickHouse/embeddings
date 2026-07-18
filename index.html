@@ -119,6 +119,10 @@ const THUMBS = 'mmcommons.image_thumbs2';
 const S3 = 'https://multimedia-commons.s3.us-west-2.amazonaws.com/data/images';
 const TILE = 1024;                 /// tile pixel size
 const COORD_BITS = 32;             /// x,y live in [0, 2^32)
+/// Floor for the brightness denominator q (expected points/pixel). Without it, zooming in past ~1 point/pixel
+/// makes count/q blow up so every lone point clamps to white; flooring keeps sparse points at their hue.
+/// A lone point renders at L = 0.75 / Q_FLOOR (1.5 -> ~0.5, a vivid mid-tone).
+const Q_FLOOR = 1.5;
 /// dim = original embedding dim; rdim = rotated QBit dim (randomHadamardTransform pads 1152->2048
 /// but leaves 768->768). q99 = z=0 per-pixel density for brightness (still siglip2's for clip/nomic).
 const DATASETS = {
@@ -231,7 +235,7 @@ function tileSQL(table, q99) {
     const { xc, yc, zc } = projCfg();   /// data columns: x,y,z (linear) or mx,my,mz (UMAP). {x:}/{y:} below are tile coords.
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
-        ${q99} / pow(4, {z:UInt8}) AS q
+        greatest(${q99} / pow(4, {z:UInt8}), ${Q_FLOOR}) AS q
     SELECT px, py,
         tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
     FROM (
@@ -291,7 +295,7 @@ function tileSQL3d(table, q99) {
     const PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
     const hue = `least(1.,greatest(0.,(color-(${u.clo}))/(${u.chi}-(${u.clo}))))`;
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, ${q99} / pow(4, {z:UInt8}) AS q
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, greatest(${q99} / pow(4, {z:UInt8}), ${Q_FLOOR}) AS q
     SELECT px, py, tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
     FROM (
         SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
