@@ -10,6 +10,8 @@
     html, body { margin: 0; height: 100%; background: #000; color: #eee;
         font-family: system-ui, sans-serif; overflow: hidden; }
     #map { position: absolute; inset: 0; background: #000; cursor: crosshair; }
+    body.proj3d #map { cursor: grab; }                              /* UMAP 3D: drag to rotate */
+    body.proj3d.rotating #map, body.rotating { cursor: grabbing; }
     /* when the report is open, shrink the map so the panel sits beside it (no overlap) */
     body.report-open #map { right: min(40%, 640px); }
     /* keep Leaflet's top controls (zoom) clear of the top header bar; JS refines to exact panel height */
@@ -124,7 +126,17 @@ const QBIT = {
 };
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
-let proj = 'linear';      /// 'linear' | 'UMAP' — map projection (UMAP uses the umap_<ds>_2d tables)
+let proj = 'linear';      /// 'linear' | 'UMAP' | 'UMAP 3D'
+let yaw = 0, pitch = 0;   /// UMAP-3D view rotation (radians): drag horizontally -> yaw, vertically -> pitch
+const U3D_PS = 0.35;      /// orthographic projection scale (fits the rotated cloud in the square)
+const is3D = () => proj === 'UMAP 3D';
+/// UMAP-3D per-dataset normalization: centre (cx,cy,cz), UNIFORM scale s (preserves 3D aspect while rotating),
+/// colour range (clo,chi) for hue, and projected-density q99 for brightness. siglip2 = PROVISIONAL (27.5M, loading).
+const U3D = {
+    siglip2: { cx: -5.9595, cy: 0.112,   cz: 0.886,   s: 11.1455, clo: -6.083, chi: 5.012, q99: 2458 },
+    clip:    { cx: 1.6235,  cy: 0.4215,  cz: 1.7995,  s: 7.0865,  clo: -6.046, chi: 4.728, q99: 2576 },
+    nomic:   { cx: 1.6845,  cy: -0.8155, cz: -0.4245, s: 7.1585,  clo: -6.13,  chi: 3.885, q99: 3061 },
+};
 let curReport = null;                                       /// md5 of the open report
 let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
 let repAbort = null;                                        /// aborts a still-running scan when switching
@@ -141,10 +153,10 @@ let rep = { type: 'Int8', rot: 'rotated', bits: 1, dims: 128 };
 /// Map projection: linear uses the emb_<ds> table (x,y,z); UMAP uses umap_<ds>_2d (mx,my,mz).
 /// The similarity SEARCH always runs on the emb table (umap tables have no embeddings).
 function projCfg() {
-    return proj === 'UMAP'
-        ? { table: `mmcommons.umap_${dataset}_2d`, xc: 'mx', yc: 'my', zc: 'mz',
-            q99: DATASETS[dataset].uq99 || DATASETS[dataset].q99 }
-        : { table: DATASETS[dataset].table, xc: 'x', yc: 'y', zc: 'z', q99: DATASETS[dataset].q99 };
+    if (proj === 'UMAP 3D') return { table: `mmcommons.umap_${dataset}_3d`, three: true, q99: U3D[dataset].q99 };
+    if (proj === 'UMAP')    return { table: `mmcommons.umap_${dataset}_2d`, xc: 'mx', yc: 'my', zc: 'mz',
+                                     q99: DATASETS[dataset].uq99 || DATASETS[dataset].q99 };
+    return { table: DATASETS[dataset].table, xc: 'x', yc: 'y', zc: 'z', q99: DATASETS[dataset].q99 };
 }
 const curTable = () => projCfg().table;
 /// QBit dim is dataset-aware: rotated cols use the dataset's rotated dim (rdim), others its original dim.
@@ -219,13 +231,39 @@ function thumbCellsSQL(table) {
 }
 
 /// ---- Rendering ----
+/// UMAP 3D: orthographic projection of the rotated (yaw,pitch) 3D cloud into the 2^32 square, aggregated per tile
+/// pixel. Projection depends on rotation -> no morton index -> full scan (~1s). rx,ry = rows 0,1 of Rx(pitch)·Ry(yaw).
+function tileSQL3d(table, q99) {
+    const u = U3D[dataset];
+    const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
+    const PX = `toUInt32(least(1.,greatest(0.,(cy_*${nx}+sy_*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const PY = `toUInt32(least(1.,greatest(0.,(sp_*sy_*${nx}+cp_*${ny}-sp_*cy_*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const hue = `least(1.,greatest(0.,(color-(${u.clo}))/(${u.chi}-(${u.clo}))))`;
+    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, ${q99} / pow(4, {z:UInt8}) AS q,
+        cos({yaw:Float64}) AS cy_, sin({yaw:Float64}) AS sy_, cos({pitch:Float64}) AS cp_, sin({pitch:Float64}) AS sp_
+    SELECT px, py, tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
+    FROM (
+        SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
+        FROM (
+            SELECT toUInt16(intDiv((PX - tx0) * ${TILE}, ts)) AS px,
+                   toUInt16(intDiv((PY - ty0) * ${TILE}, ts)) AS py, count() AS cnt, avg(hue) AS hue
+            FROM (SELECT ${PX} AS PX, ${PY} AS PY, ${hue} AS hue FROM ${table})
+            WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
+            GROUP BY px, py
+        )
+    ) FORMAT RowBinary`;
+}
 async function renderTile(coords, canvas) {
-    const table = curTable(), q99 = projCfg().q99;
+    const cfg = projCfg(), table = cfg.table, q99 = cfg.q99;
     const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
     try {
-        if (mode === 'thumbs' && !reportActive) { await renderThumbs(p, table, q99, ctx); return; }
-        const buf = await (await chQuery(tileSQL(table, q99), p)).arrayBuffer();
+        let sql;
+        if (cfg.three) { p.yaw = yaw; p.pitch = pitch; sql = tileSQL3d(table, q99); }   /// UMAP 3D: rotated projection
+        else if (mode === 'thumbs' && !reportActive) { await renderThumbs(p, table, q99, ctx); return; }
+        else sql = tileSQL(table, q99);
+        const buf = await (await chQuery(sql, p)).arrayBuffer();
         const dv = new DataView(buf);
         const img = ctx.createImageData(TILE, TILE);
         for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
@@ -329,6 +367,7 @@ async function umapCoords(md5s) {
     return m;
 }
 async function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail markers at their map points
+    if (is3D()) return;                    /// 3D overlay not placed yet (would need per-frame client-side re-projection)
     let pts = rows;
     if (proj === 'UMAP') {                 /// reposition to UMAP coords; drop results not present in the umap table (e.g. siglip2 subset)
         const cm = await umapCoords(rows.map(r => r.md5));
@@ -378,6 +417,7 @@ function latlngToData(latlng) {
 
 /// ---- Click -> nearest point -> report ----
 map.on('click', async (e) => {
+    if (is3D()) return;                                  /// 3D handles click via its own drag/rotate mouseup
     /// point-cloud: if the hover thumbnail is showing, target exactly that image (what the user sees)
     if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }
     const { table, xc, yc } = projCfg();
@@ -419,7 +459,7 @@ let hoverTimer = null, hoverSeq = 0, hoverMd5 = null;
 function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null; document.getElementById('hover').style.display = 'none'; }
 map.on('mousemove', (e) => {
     hideHover();                                             /// moving -> hide, restart the dwell timer
-    if (mode !== 'points') return;
+    if (mode !== 'points' || is3D()) return;                /// no hover in 3D (drag = rotate; nearest scan too slow)
     const ll = e.latlng, cp = e.containerPoint;
     hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);
 });
@@ -754,7 +794,8 @@ function buildSwitch(elemId, keys, current, onPick) {
 const urlp = new URLSearchParams(location.hash.slice(1));
 if (DATASETS[urlp.get('ds')]) dataset = urlp.get('ds');
 if (urlp.get('mode') === 'points' || urlp.get('mode') === 'thumbs') mode = urlp.get('mode');
-if (urlp.get('proj') === 'linear' || urlp.get('proj') === 'UMAP') proj = urlp.get('proj');
+if (['linear', 'UMAP', 'UMAP 3D'].includes(urlp.get('proj'))) proj = urlp.get('proj');
+if (is3D()) { yaw = +urlp.get('yaw') || 0; pitch = +urlp.get('pitch') || 0; }
 if (urlp.get('type')) rep.type = urlp.get('type');
 if (urlp.get('rot')) rep.rot = urlp.get('rot');
 if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
@@ -773,12 +814,58 @@ buildSwitch('modes', ['points', 'thumbs'], mode, k => {
     if (k === 'thumbs' && reportActive) hideReport();   /// thumbs mode has no top-K panel — close it on switch
     hideHover(); redraw(); updateURL();
 });
-buildSwitch('projs', ['linear', 'UMAP'], proj, k => {
+buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
     proj = k;
-    hideHover(); redraw();                               /// re-render tiles for the new projection (linear x,y,z vs umap mx,my,mz)
-    if (reportActive) { clearOverlay(); addOverlayThumbs(lastRows); }   /// re-place the result overlay at the new projection
+    set3DMode(is3D());
+    hideHover(); redraw();                               /// re-render tiles for the new projection
+    if (reportActive) { clearOverlay(); if (!is3D()) addOverlayThumbs(lastRows); }   /// (overlay not placed in 3D)
     updateURL();
 });
+/// UMAP 3D: drag rotates the cloud (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
+function set3DMode(on) {
+    document.body.classList.toggle('proj3d', on);
+    if (on) map.dragging.disable();
+    else { map.dragging.enable(); document.body.classList.remove('rotating'); }
+}
+let rotating = false, rStart = null, rMoved = 0, rotTimer = null;
+function scheduleRotateRedraw() {   /// throttle re-queries during a drag (each rotated-tile scan is ~1s)
+    if (rotTimer) return;
+    rotTimer = setTimeout(() => { rotTimer = null; redraw(); }, 120);
+}
+map.getContainer().addEventListener('mousedown', (e) => {
+    if (!is3D() || e.button !== 0) return;
+    rotating = true; rMoved = 0; rStart = { x: e.clientX, y: e.clientY, yaw, pitch };
+    document.body.classList.add('rotating');
+});
+addEventListener('mousemove', (e) => {
+    if (!rotating) return;
+    const dx = e.clientX - rStart.x, dy = e.clientY - rStart.y;   /// horizontal drag -> yaw, vertical -> pitch
+    rMoved = Math.max(rMoved, Math.abs(dx) + Math.abs(dy));
+    yaw = rStart.yaw + dx * 0.008;
+    pitch = Math.max(-1.5, Math.min(1.5, rStart.pitch + dy * 0.008));
+    scheduleRotateRedraw();
+});
+addEventListener('mouseup', (e) => {
+    if (!rotating) return;
+    rotating = false; document.body.classList.remove('rotating');
+    if (rMoved < 4) click3D(e);                          /// negligible drag -> treat as a click -> report
+    else { redraw(); updateURL(); }
+});
+/// click in 3D: nearest point in the current rotated projection (full scan) -> report
+async function click3D(e) {
+    const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
+    const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
+    const PX = `toUInt32(least(1.,greatest(0.,(cos({yaw:Float64})*${nx}+sin({yaw:Float64})*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const PY = `toUInt32(least(1.,greatest(0.,(sin({pitch:Float64})*sin({yaw:Float64})*${nx}+cos({pitch:Float64})*${ny}-sin({pitch:Float64})*cos({yaw:Float64})*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const sql = `SELECT md5 FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM mmcommons.umap_${dataset}_3d)
+        ORDER BY pow(toInt64(PX)-toInt64({cx:UInt32}),2)+pow(toInt64(PY)-toInt64({cy:UInt32}),2) ASC LIMIT 1 FORMAT TSV`;
+    setStatus('finding point…');
+    try {
+        const md5 = (await (await chQuery(sql, { yaw, pitch, cx: d.x, cy: d.y }, 'TSV')).text()).trim();
+        if (md5) showReport(md5); else setStatus('no point');
+    } catch (err) { showError(String(err).slice(0, 500)); }
+}
+set3DMode(is3D());   /// apply on load (e.g. when proj=UMAP 3D restored from the URL)
 
 /// offset the Leaflet top controls below the (variable-height, wrappable) header bar
 function offsetControls() {
@@ -800,6 +887,7 @@ function updateURL() {
     const c = latlngToData(map.getCenter());
     const p = new URLSearchParams();
     p.set('ds', dataset); p.set('mode', mode); p.set('proj', proj);
+    if (is3D()) { p.set('yaw', yaw.toFixed(4)); p.set('pitch', pitch.toFixed(4)); }
     p.set('z', Math.round(map.getZoom())); p.set('x', c.x); p.set('y', c.y);
     if (reportActive && curReport) {
         p.set('md5', curReport); p.set('type', rep.type); p.set('rot', rep.rot);
