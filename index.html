@@ -127,9 +127,19 @@ const QBIT = {
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
 let proj = 'linear';      /// 'linear' | 'UMAP' | 'UMAP 3D'
-let yaw = 0, pitch = 0;   /// UMAP-3D view rotation (radians): drag horizontally -> yaw, vertically -> pitch
+let R = [[1,0,0],[0,1,0],[0,0,1]];   /// UMAP-3D view rotation (world->view); updated on drag RELEASE (arcball)
 const U3D_PS = 0.35;      /// orthographic projection scale (fits the rotated cloud in the square)
 const is3D = () => proj === 'UMAP 3D';
+/// 3x3 helpers + the 6 projection coefficients (rows 0,1 of R -> screen x,y) passed to the tile query
+function matMul(A, B) { const C = [[0,0,0],[0,0,0],[0,0,0]]; for (let i=0;i<3;i++) for (let j=0;j<3;j++) for (let k=0;k<3;k++) C[i][j] += A[i][k]*B[k][j]; return C; }
+function cross(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function axisAngle(ax, ay, az, th) {   /// Rodrigues rotation matrix about UNIT axis (ax,ay,az) by angle th
+    const c = Math.cos(th), s = Math.sin(th), t = 1 - c;
+    return [[t*ax*ax+c, t*ax*ay-s*az, t*ax*az+s*ay],
+            [t*ax*ay+s*az, t*ay*ay+c, t*ay*az-s*ax],
+            [t*ax*az-s*ay, t*ay*az+s*ax, t*az*az+c]];
+}
+const rotParams = () => ({ r0: R[0][0], r1: R[0][1], r2: R[0][2], r3: R[1][0], r4: R[1][1], r5: R[1][2] });
 /// UMAP-3D per-dataset normalization: centre (cx,cy,cz), UNIFORM scale s (preserves 3D aspect while rotating),
 /// colour range (clo,chi) for hue, and projected-density q99 for brightness. siglip2 = PROVISIONAL (27.5M, loading).
 const U3D = {
@@ -231,17 +241,18 @@ function thumbCellsSQL(table) {
 }
 
 /// ---- Rendering ----
-/// UMAP 3D: orthographic projection of the rotated (yaw,pitch) 3D cloud into the 2^32 square, aggregated per tile
-/// pixel. Projection depends on rotation -> no morton index -> full scan (~1s). rx,ry = rows 0,1 of Rx(pitch)·Ry(yaw).
+/// UMAP 3D: orthographic projection of the rotated 3D cloud into the 2^32 square, aggregated per tile pixel.
+/// Projection depends on rotation -> no morton index -> full scan (~1s). rx,ry = rows 0,1 of the view matrix R.
 function tileSQL3d(table, q99) {
     const u = U3D[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
-    const PX = `toUInt32(least(1.,greatest(0.,(cy_*${nx}+sy_*${nz})*${U3D_PS}+0.5))*4294967295)`;
-    const PY = `toUInt32(least(1.,greatest(0.,(sp_*sy_*${nx}+cp_*${ny}-sp_*cy_*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`;   /// screen x = row 0 of R · (nx,ny,nz)
+    const ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;   /// screen y = row 1 of R · (nx,ny,nz)
+    const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`;
+    const PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
     const hue = `least(1.,greatest(0.,(color-(${u.clo}))/(${u.chi}-(${u.clo}))))`;
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, ${q99} / pow(4, {z:UInt8}) AS q,
-        cos({yaw:Float64}) AS cy_, sin({yaw:Float64}) AS sy_, cos({pitch:Float64}) AS cp_, sin({pitch:Float64}) AS sp_
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, ${q99} / pow(4, {z:UInt8}) AS q
     SELECT px, py, tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
     FROM (
         SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
@@ -262,11 +273,13 @@ async function renderTile(coords, canvas) {
     const cfg = projCfg(), table = cfg.table, q99 = cfg.q99;
     const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
+    const seq = canvas._rseq = (canvas._rseq || 0) + 1;   /// discard a stale render if a newer one for this tile started
     try {
         let sql;
-        if (cfg.three) { p.yaw = yaw; p.pitch = pitch; sql = tileSQL3d(table, q99); }   /// UMAP 3D: rotated projection
+        if (cfg.three) { Object.assign(p, rotParams()); sql = tileSQL3d(table, q99); }   /// UMAP 3D: rotated projection
         else sql = tileSQL(table, q99);
         const buf = await (await chQuery(sql, p)).arrayBuffer();
+        if (canvas._rseq !== seq) return;                 /// superseded -> keep the current image (no blank / no stale overwrite)
         const dv = new DataView(buf);
         const img = ctx.createImageData(TILE, TILE);
         for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
@@ -358,9 +371,19 @@ function applyMode() {
     if (showThumbs) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
     else if (map.hasLayer(thumbLayer)) map.removeLayer(thumbLayer);
 }
-/// Re-render the point cloud (and the thumb overlay if present) — for projection / 3D-rotation
-/// changes, where the tile coordinates genuinely change. NOT used for points<->thumbs (see applyMode).
-function redraw() { if (pointLayer) pointLayer.redraw(); if (thumbLayer && map.hasLayer(thumbLayer)) thumbLayer.redraw(); }
+/// Re-render the point cloud for projection / 3D-rotation changes (tile coordinates genuinely change),
+/// NOT for points<->thumbs (see applyMode). The point-cloud tiles are re-rendered IN PLACE — each keeps
+/// its old image until the new one is drawn (see the _rseq guard in renderTile) — so the cloud never
+/// blanks while the rotated/reprojected tiles load (unlike pointLayer.redraw(), which removes tiles first).
+/// The thumb overlay (transparent, on top) uses a plain redraw; the cloud stays visible beneath it.
+function redraw() {
+    if (thumbLayer && map.hasLayer(thumbLayer)) thumbLayer.redraw();
+    if (!pointLayer || !pointLayer._tiles) return Promise.resolve();
+    return Promise.all(Object.keys(pointLayer._tiles).map(k => {
+        const t = pointLayer._tiles[k];
+        return (t && t.el && t.coords) ? renderTile(t.coords, t.el) : null;
+    }));
+}
 
 /// ---- top-K overlay: result thumbnails placed on the map at their (x,y) points ----
 let reportActive = false;
@@ -817,7 +840,10 @@ const urlp = new URLSearchParams(location.hash.slice(1));
 if (DATASETS[urlp.get('ds')]) dataset = urlp.get('ds');
 if (urlp.get('mode') === 'points' || urlp.get('mode') === 'thumbs') mode = urlp.get('mode');
 if (['linear', 'UMAP', 'UMAP 3D'].includes(urlp.get('proj'))) proj = urlp.get('proj');
-if (is3D()) { yaw = +urlp.get('yaw') || 0; pitch = +urlp.get('pitch') || 0; }
+if (is3D() && urlp.get('r3d')) {
+    const a = urlp.get('r3d').split(',').map(Number);   /// rows 0,1 of R; row 2 = cross (R is orthonormal)
+    if (a.length === 6 && a.every(Number.isFinite)) R = [[a[0],a[1],a[2]], [a[3],a[4],a[5]], cross([a[0],a[1],a[2]], [a[3],a[4],a[5]])];
+}
 if (urlp.get('type')) rep.type = urlp.get('type');
 if (urlp.get('rot')) rep.rot = urlp.get('rot');
 if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
@@ -843,47 +869,56 @@ buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
     if (reportActive) { clearOverlay(); if (!is3D()) addOverlayThumbs(lastRows); }   /// (overlay not placed in 3D)
     updateURL();
 });
-/// UMAP 3D: drag rotates the cloud (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
+/// UMAP 3D: drag rotates the cloud, Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
 function set3DMode(on) {
     document.body.classList.toggle('proj3d', on);
     if (on) map.dragging.disable();
     else { map.dragging.enable(); document.body.classList.remove('rotating'); }
 }
-let rotating = false, rStart = null, rMoved = 0, rotTimer = null;
-function scheduleRotateRedraw() {   /// throttle re-queries during a drag (each rotated-tile scan is ~1s)
-    if (rotTimer) return;
-    rotTimer = setTimeout(() => { rotTimer = null; redraw(); }, 120);
+/// Rotation is applied ONCE, on release (not during the drag). The drag start->end vector d and the view
+/// normal span the rotation plane; the rotation axis is the in-screen vector perpendicular to d, i.e. (-dy,dx,0)
+/// (so the visible projection plane itself is never rotated — points tilt into/out of depth along the drag).
+let rotating = false, rStart = null, panning = false, panStart = null;
+function endRotate(cx, cy, evForClick) {
+    rotating = false; document.body.classList.remove('rotating');
+    const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
+    if (len < 5) { if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
+    R = matMul(axisAngle(-dy / len, dx / len, 0, len * 0.006), R);  /// pre-multiply: rotate in view space
+    redraw(); updateURL();
 }
 map.getContainer().addEventListener('mousedown', (e) => {
     if (!is3D() || e.button !== 0) return;
-    rotating = true; rMoved = 0; rStart = { x: e.clientX, y: e.clientY, yaw, pitch };
-    document.body.classList.add('rotating');
+    if (e.ctrlKey || e.metaKey) {                                   /// Ctrl/Cmd+drag pans the map (live) instead of rotating
+        panning = true; panStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
+    } else {
+        rotating = true; rStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
+    }
 });
-addEventListener('mousemove', (e) => {
-    if (!rotating) return;
-    const dx = e.clientX - rStart.x, dy = e.clientY - rStart.y;   /// horizontal drag -> yaw, vertical -> pitch
-    rMoved = Math.max(rMoved, Math.abs(dx) + Math.abs(dy));
-    yaw = rStart.yaw + dx * 0.008;
-    pitch = Math.max(-1.5, Math.min(1.5, rStart.pitch + dy * 0.008));
-    scheduleRotateRedraw();
+addEventListener('mousemove', (e) => {   /// live pan (Leaflet drag is off in 3D so we drive panBy ourselves)
+    if (!panning) return;
+    map.panBy([panStart.x - e.clientX, panStart.y - e.clientY], { animate: false });
+    panStart = { x: e.clientX, y: e.clientY };
 });
 addEventListener('mouseup', (e) => {
-    if (!rotating) return;
-    rotating = false; document.body.classList.remove('rotating');
-    if (rMoved < 4) click3D(e);                          /// negligible drag -> treat as a click -> report
-    else { redraw(); updateURL(); }
+    if (panning) { panning = false; document.body.classList.remove('rotating'); updateURL(); }
+    else if (rotating) endRotate(e.clientX, e.clientY, e);
 });
+map.getContainer().addEventListener('touchstart', (e) => {
+    if (!is3D() || e.touches.length !== 1) return;
+    rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; document.body.classList.add('rotating');
+}, { passive: true });
+addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, t); } });
 /// click in 3D: nearest point in the current rotated projection (full scan) -> report
 async function click3D(e) {
     const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
-    const PX = `toUInt32(least(1.,greatest(0.,(cos({yaw:Float64})*${nx}+sin({yaw:Float64})*${nz})*${U3D_PS}+0.5))*4294967295)`;
-    const PY = `toUInt32(least(1.,greatest(0.,(sin({pitch:Float64})*sin({yaw:Float64})*${nx}+cos({pitch:Float64})*${ny}-sin({pitch:Float64})*cos({yaw:Float64})*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const PX = `toUInt32(least(1.,greatest(0.,({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const PY = `toUInt32(least(1.,greatest(0.,({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
     const sql = `SELECT md5 FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM mmcommons.umap_${dataset}_3d)
         ORDER BY pow(toInt64(PX)-toInt64({cx:UInt32}),2)+pow(toInt64(PY)-toInt64({cy:UInt32}),2) ASC LIMIT 1 FORMAT TSV`;
     setStatus('finding point…');
     try {
-        const md5 = (await (await chQuery(sql, { yaw, pitch, cx: d.x, cy: d.y }, 'TSV')).text()).trim();
+        const md5 = (await (await chQuery(sql, { ...rotParams(), cx: d.x, cy: d.y }, 'TSV')).text()).trim();
         if (md5) showReport(md5); else setStatus('no point');
     } catch (err) { showError(String(err).slice(0, 500)); }
 }
@@ -910,7 +945,7 @@ function updateURL() {
     const c = latlngToData(map.getCenter());
     const p = new URLSearchParams();
     p.set('ds', dataset); p.set('mode', mode); p.set('proj', proj);
-    if (is3D()) { p.set('yaw', yaw.toFixed(4)); p.set('pitch', pitch.toFixed(4)); }
+    if (is3D()) { const rp = rotParams(); p.set('r3d', [rp.r0,rp.r1,rp.r2,rp.r3,rp.r4,rp.r5].map(v => v.toFixed(5)).join(',')); }
     p.set('z', Math.round(map.getZoom())); p.set('x', c.x); p.set('y', c.y);
     if (reportActive && curReport) {
         p.set('md5', curReport); p.set('type', rep.type); p.set('rot', rep.rot);
