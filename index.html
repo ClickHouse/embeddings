@@ -127,9 +127,9 @@ const Q_FLOOR = 1.5;
 /// dim = original embedding dim; rdim = rotated QBit dim (randomHadamardTransform pads 1152->2048
 /// but leaves 768->768). q99 = z=0 per-pixel density for brightness (still siglip2's for clip/nomic).
 const DATASETS = {
-    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152, rdim: 2048, q99: 378, uq99: 662 },
-    clip:    { table: 'mmcommons.emb_clip',    dim: 768,  rdim: 768,  q99: 378, uq99: 1552 },
-    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  rdim: 768,  q99: 378, uq99: 1206 },
+    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152, rdim: 2048, q99: 378, uq99: 2335 },
+    clip:    { table: 'mmcommons.emb_clip',    dim: 768,  rdim: 768,  q99: 378, uq99: 2343 },
+    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  rdim: 768,  q99: 378, uq99: 1914 },
 };
 /// The 4 QBit representation columns (type x rotation). Report similarity uses ONLY these via
 /// cosineDistanceTransposed(qbit, ref[dims], bits, dims). The QBit dim is dataset-aware (see qbitInfo).
