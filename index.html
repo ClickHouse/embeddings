@@ -254,6 +254,23 @@ function thumbCellsSQL(table) {
     GROUP BY cx, cy
     FORMAT RowBinary`;
 }
+/// 3D thumbnail cells: one representative md5 per 75px cell of the ROTATED projection (full scan, like tileSQL3d).
+function thumbCellsSQL3d(table) {
+    const CELL = 75, u = U3D[dataset];
+    const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
+    const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
+    const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`, PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
+    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, intDiv(ts * ${CELL}, ${TILE}) AS cell
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
+    FROM (
+        SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
+        FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM ${table})
+        WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
+    )
+    GROUP BY cx, cy
+    FORMAT RowBinary`;
+}
 
 /// ---- Rendering ----
 /// UMAP 3D: orthographic projection of the rotated 3D cloud into the 2^32 square, aggregated per tile pixel.
@@ -316,13 +333,16 @@ async function renderTile(coords, canvas) {
     } catch (e) { showError(String(e).slice(0, 500)); }
 }
 /// Thumbnail overlay tile: a transparent canvas with one representative thumbnail per 75px cell,
-/// drawn on its OWN layer sitting on top of the (untouched) point cloud. Not used in UMAP 3D.
+/// drawn on its OWN layer sitting on top of the (untouched) point cloud. In UMAP 3D the cells come
+/// from the rotated projection (thumbCellsSQL3d) and re-render on rotation via thumbLayer.redraw().
 async function renderThumbTile(coords, canvas) {
     const { table } = projCfg();
     const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
     try {
-        const cells = new Uint8Array(await (await chQuery(thumbCellsSQL(table), p)).arrayBuffer());
+        let sql = thumbCellsSQL(table);
+        if (is3D()) { Object.assign(p, rotParams()); sql = thumbCellsSQL3d(table); }
+        const cells = new Uint8Array(await (await chQuery(sql, p)).arrayBuffer());
         let o = 0;
         while (o + 4 < cells.length) {
             const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
@@ -389,7 +409,7 @@ function makeLayer() {
 /// hidden in a report (point cloud shown full-brightness under the top-K overlay) and in UMAP 3D.
 function applyMode() {
     if (!pointLayer) return;
-    const showThumbs = mode === 'thumbs' && !reportActive && !is3D();
+    const showThumbs = mode === 'thumbs' && !reportActive;   /// thumbnail overlay in 2D and (rotated) in UMAP 3D
     pointLayer.setOpacity(showThumbs ? 0.5 : 1);
     if (showThumbs) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
     else if (map.hasLayer(thumbLayer)) map.removeLayer(thumbLayer);
@@ -559,13 +579,36 @@ let hoverTimer = null, hoverSeq = 0, hoverMd5 = null;
 function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null; document.getElementById('hover').style.display = 'none'; }
 map.on('mousemove', (e) => {
     hideHover();                                             /// moving -> hide, restart the dwell timer
-    if (mode !== 'points' || is3D()) return;                /// no hover in 3D (drag = rotate; nearest scan too slow)
+    if (mode !== 'points' || rotating || panning) return;   /// no hover while rotating/panning the 3D cloud
     const ll = e.latlng, cp = e.containerPoint;
     hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);
 });
 map.on('mouseout movestart zoomstart', hideHover);
+/// UMAP 3D hover: find the nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current
+/// rotation) — instant, no ~1s full scan. Less precise than the 2D server lookup, so ignore matches too far off.
+function hoverPreview3D(cp) {
+    const d = previewData[dataset];
+    if (!d || d === 'loading') { loadPreview(dataset); return; }
+    const t = previewTransform(), { n, nx, ny, nz, md5 } = d;
+    const r0 = R[0][0], r1 = R[0][1], r2 = R[0][2], r3 = R[1][0], r4 = R[1][1], r5 = R[1][2];
+    let best = -1, bestD = Infinity;
+    for (let i = 0; i < n; i++) {
+        const X = nx[i], Y = ny[i], Z = nz[i];
+        const ex = (t.SX * (r0*X + r1*Y + r2*Z) + t.OX) - cp.x, ey = (t.SY * (r3*X + r4*Y + r5*Z) + t.OY) - cp.y;
+        const dd = ex*ex + ey*ey; if (dd < bestD) { bestD = dd; best = i; }
+    }
+    if (best < 0 || bestD > 40*40) return;                  /// nothing near enough (subset is sparse when zoomed in)
+    const seq = ++hoverSeq, m = md5[best];
+    hoverMd5 = m;                                            /// a click uses this exact image (see click3D)
+    const h = document.getElementById('hover');
+    h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = m;
+    h.onload = () => { if (seq === hoverSeq && mode === 'points' && is3D()) h.style.display = 'block'; };
+    h.src = thumbURL(m);
+    if (h.complete && h.naturalWidth) h.style.display = 'block';
+}
 async function hoverPreview(latlng, cp) {
     if (mode !== 'points') return;
+    if (is3D()) return hoverPreview3D(cp);
     const seq = ++hoverSeq, d = latlngToData(latlng);
     const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE, r = Math.max(1, Math.round(px * 6));
     /// nearest point via the morton projection; routed to website_thumbs (point-query user) not to compete with reports
@@ -945,21 +988,25 @@ async function loadPreview(ds) {
     if (previewData[ds]) return;                  /// already loaded or loading
     previewData[ds] = 'loading';
     try {
-        const u = U3D[ds];
-        const buf = await (await chQuery(`SELECT x, y, z, color FROM mmcommons.umap_${ds}_3d LIMIT ${PREVIEW_N} FORMAT RowBinary`, {})).arrayBuffer();
-        const dv = new DataView(buf), n = (buf.byteLength / 16) | 0;
-        const nx = new Float32Array(n), ny = new Float32Array(n), nz = new Float32Array(n);
-        const cr = new Uint8Array(n), cg = new Uint8Array(n), cb = new Uint8Array(n);
-        const crange = u.chi - u.clo;
-        for (let i = 0, o = 0; i < n; i++, o += 16) {
-            nx[i] = (dv.getFloat32(o, true)     - u.cx) / u.s;   /// same normalization as tileSQL3d
-            ny[i] = (dv.getFloat32(o + 4, true) - u.cy) / u.s;
-            nz[i] = (dv.getFloat32(o + 8, true) - u.cz) / u.s;
-            const hue = Math.max(0, Math.min(1, (dv.getFloat32(o + 12, true) - u.clo) / crange));
-            const rgb = oklchToRGB(0.75, 0.16, hue * 360);
-            cr[i] = rgb[0] * PREVIEW_ALPHA; cg[i] = rgb[1] * PREVIEW_ALPHA; cb[i] = rgb[2] * PREVIEW_ALPHA;
+        const u = U3D[ds], crange = u.chi - u.clo;
+        /// x,y,z,color (fixed 16 bytes) + md5 (varint-length string; used for client-side hover nearest lookup)
+        const buf = await (await chQuery(`SELECT x, y, z, color, md5 FROM mmcommons.umap_${ds}_3d LIMIT ${PREVIEW_N} FORMAT RowBinary`, {})).arrayBuffer();
+        const dv = new DataView(buf), bytes = new Uint8Array(buf), td = new TextDecoder();
+        const nx = [], ny = [], nz = [], cr = [], cg = [], cb = [], md5 = [];
+        let o = 0;
+        while (o + 17 <= buf.byteLength) {
+            const x = dv.getFloat32(o, true), y = dv.getFloat32(o+4, true), z = dv.getFloat32(o+8, true), c = dv.getFloat32(o+12, true);
+            o += 16;
+            const len = bytes[o++];               /// md5 compact form is < 128 chars -> single varint length byte
+            if (o + len > buf.byteLength) break;
+            md5.push(td.decode(bytes.subarray(o, o + len))); o += len;
+            nx.push((x - u.cx) / u.s); ny.push((y - u.cy) / u.s); nz.push((z - u.cz) / u.s);   /// same normalization as tileSQL3d
+            const hue = Math.max(0, Math.min(1, (c - u.clo) / crange)), rgb = oklchToRGB(0.75, 0.16, hue * 360);
+            cr.push(rgb[0] * PREVIEW_ALPHA); cg.push(rgb[1] * PREVIEW_ALPHA); cb.push(rgb[2] * PREVIEW_ALPHA);
         }
-        previewData[ds] = { n, nx, ny, nz, cr, cg, cb };
+        previewData[ds] = { n: md5.length, md5,
+            nx: Float32Array.from(nx), ny: Float32Array.from(ny), nz: Float32Array.from(nz),
+            cr: Uint8Array.from(cr), cg: Uint8Array.from(cg), cb: Uint8Array.from(cb) };
     } catch (e) { previewData[ds] = null; }        /// on failure just skip the preview (release still re-renders)
 }
 /// data coords (0..2^32) -> container pixels is affine at a fixed map view; capture it once per drag.
@@ -1051,6 +1098,7 @@ map.getContainer().addEventListener('touchmove', (e) => {
 addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, t); } });
 /// click in 3D: nearest point in the current rotated projection (full scan) -> report
 async function click3D(e) {
+    if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }   /// click the hovered image (instant)
     const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const PX = `toUInt32(least(1.,greatest(0.,({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
