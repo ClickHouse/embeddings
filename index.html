@@ -254,6 +254,10 @@ function tileSQL3d(table, q99) {
         )
     ) FORMAT RowBinary`;
 }
+/// The point cloud is a persistent base layer shown in BOTH modes; switching points<->thumbs
+/// never re-renders (or re-queries) it — see applyMode. Projection / 3D-rotation changes DO
+/// re-render it (the tile coordinates genuinely change) via redraw(). Thumbs mode dims it via
+/// the layer's opacity, not by re-fetching darker pixels.
 async function renderTile(coords, canvas) {
     const cfg = projCfg(), table = cfg.table, q99 = cfg.q99;
     const p = { z: coords.z, x: coords.x, y: coords.y };
@@ -261,7 +265,6 @@ async function renderTile(coords, canvas) {
     try {
         let sql;
         if (cfg.three) { p.yaw = yaw; p.pitch = pitch; sql = tileSQL3d(table, q99); }   /// UMAP 3D: rotated projection
-        else if (mode === 'thumbs' && !reportActive) { await renderThumbs(p, table, q99, ctx); return; }
         else sql = tileSQL(table, q99);
         const buf = await (await chQuery(sql, p)).arrayBuffer();
         const dv = new DataView(buf);
@@ -276,25 +279,23 @@ async function renderTile(coords, canvas) {
         hideError();
     } catch (e) { showError(String(e).slice(0, 500)); }
 }
-async function renderThumbs(p, table, q99, ctx) {
-    /// faint point cloud first, then thumbnails on top
-    const buf = await (await chQuery(tileSQL(table, q99), p)).arrayBuffer();
-    const dv = new DataView(buf), img = ctx.createImageData(TILE, TILE);
-    for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
-        const px = dv.getUint16(o, true), py = dv.getUint16(o + 2, true), i = (py*TILE+px)*4;
-        img.data[i] = dv.getUint8(o+4)>>1; img.data[i+1] = dv.getUint8(o+5)>>1;
-        img.data[i+2] = dv.getUint8(o+6)>>1; img.data[i+3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-    const cells = new Uint8Array(await (await chQuery(thumbCellsSQL(table), p)).arrayBuffer());
-    let o = 0;
-    while (o + 4 < cells.length) {
-        const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
-        const len = cells[o++];               /// md5 <= 127 bytes -> single varint byte
-        const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
-        drawThumb(ctx, px, py, md5);
-    }
-    hideError();
+/// Thumbnail overlay tile: a transparent canvas with one representative thumbnail per 75px cell,
+/// drawn on its OWN layer sitting on top of the (untouched) point cloud. Not used in UMAP 3D.
+async function renderThumbTile(coords, canvas) {
+    const { table } = projCfg();
+    const p = { z: coords.z, x: coords.x, y: coords.y };
+    const ctx = canvas.getContext('2d');
+    try {
+        const cells = new Uint8Array(await (await chQuery(thumbCellsSQL(table), p)).arrayBuffer());
+        let o = 0;
+        while (o + 4 < cells.length) {
+            const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
+            const len = cells[o++];               /// md5 <= 127 bytes -> single varint byte
+            const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
+            drawThumb(ctx, px, py, md5);
+        }
+        hideError();
+    } catch (e) { showError(String(e).slice(0, 500)); }
 }
 function drawThumb(ctx, px, py, md5) {
     const im = new Image();
@@ -320,9 +321,11 @@ map.attributionControl.setPrefix(false).addAttribution(
 const worldBounds = L.latLngBounds(map.unproject([0, TILE], 0), map.unproject([TILE, 0], 0));
 map.setMaxBounds(worldBounds.pad(0.3));
 map.fitBounds(worldBounds);
-let layer = null;
-function makeLayer() {
-    if (layer) map.removeLayer(layer);
+/// Two stacked tile layers: the point cloud (persistent, shared by both modes) sits underneath,
+/// and the thumbnail overlay (present only in 2D thumbs mode) on top. A GridLayer subclass
+/// parameterized by its per-tile renderer builds both.
+let pointLayer = null, thumbLayer = null;
+function makeGrid(render, zIndex) {
     const Grid = L.GridLayer.extend({ createTile: function(coords, done) {
         const c = L.DomUtil.create('canvas', 'leaflet-tile');
         c.width = TILE; c.height = TILE;
@@ -331,14 +334,33 @@ function makeLayer() {
             setTimeout(() => done(null, c), 0);   /// transparent tile, no query
             return c;
         }
-        renderTile(coords, c).then(() => done(null, c)).catch(() => done(null, c));
+        render(coords, c).then(() => done(null, c)).catch(() => done(null, c));
         return c;
     }});
-    layer = new Grid({ tileSize: TILE, minZoom: 0, maxZoom: 22, maxNativeZoom: 20, minNativeZoom: 0,
-        bounds: worldBounds, noWrap: true });
-    layer.addTo(map);
+    return new Grid({ tileSize: TILE, minZoom: 0, maxZoom: 22, maxNativeZoom: 20, minNativeZoom: 0,
+        bounds: worldBounds, noWrap: true, zIndex });
 }
-function redraw() { if (layer) layer.redraw(); }
+function makeLayer() {
+    if (pointLayer) map.removeLayer(pointLayer);
+    if (thumbLayer) map.removeLayer(thumbLayer);
+    pointLayer = makeGrid(renderTile, 1);
+    thumbLayer = makeGrid(renderThumbTile, 2);
+    pointLayer.addTo(map);
+    applyMode();   /// add the thumb overlay + dim the point cloud if the current mode is 2D thumbs
+}
+/// Switch points<->thumbs WITHOUT re-rendering the point cloud: it stays put in both directions
+/// (only its opacity changes) and we just add/remove the thumbnail overlay on top. Thumbs are
+/// hidden in a report (point cloud shown full-brightness under the top-K overlay) and in UMAP 3D.
+function applyMode() {
+    if (!pointLayer) return;
+    const showThumbs = mode === 'thumbs' && !reportActive && !is3D();
+    pointLayer.setOpacity(showThumbs ? 0.5 : 1);
+    if (showThumbs) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
+    else if (map.hasLayer(thumbLayer)) map.removeLayer(thumbLayer);
+}
+/// Re-render the point cloud (and the thumb overlay if present) — for projection / 3D-rotation
+/// changes, where the tile coordinates genuinely change. NOT used for points<->thumbs (see applyMode).
+function redraw() { if (pointLayer) pointLayer.redraw(); if (thumbLayer && map.hasLayer(thumbLayer)) thumbLayer.redraw(); }
 
 /// ---- top-K overlay: result thumbnails placed on the map at their (x,y) points ----
 let reportActive = false;
@@ -497,7 +519,7 @@ function showReport(md5) {
     document.getElementById('report').style.display = 'block';
     layoutForReport(true);                                   /// push the map left so the panel doesn't overlap it
     if (!reportActive) {                                     /// entering report: overlay on, hide the thumbnail tiles (show point cloud)
-        reportActive = true; topkLayer.addTo(map); if (mode === 'thumbs') redraw();
+        reportActive = true; topkLayer.addTo(map); applyMode();
     }
     if (!document.getElementById('grid')) buildReportShell();
     document.getElementById('rc-query').innerHTML =
@@ -754,7 +776,7 @@ function hideReport() {
     document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
     reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
     repMd5s = []; tagSeq++; document.getElementById('tagcloud').style.display = 'none';   /// clear the tag cloud
-    if (mode === 'thumbs') redraw();                         /// restore the thumbnail tiles
+    applyMode();                                             /// restore the thumbnail overlay (point cloud untouched)
     updateURL();
 }
 /// Toggle the map-shrink layout and tell Leaflet to re-measure its container.
@@ -812,12 +834,12 @@ buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
 buildSwitch('modes', ['points', 'thumbs'], mode, k => {
     mode = k;
     if (k === 'thumbs' && reportActive) hideReport();   /// thumbs mode has no top-K panel — close it on switch
-    hideHover(); redraw(); updateURL();
+    hideHover(); applyMode(); updateURL();               /// toggle the thumb overlay; keep the point cloud as-is
 });
 buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
     proj = k;
     set3DMode(is3D());
-    hideHover(); redraw();                               /// re-render tiles for the new projection
+    hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
     if (reportActive) { clearOverlay(); if (!is3D()) addOverlayThumbs(lastRows); }   /// (overlay not placed in 3D)
     updateURL();
 });
