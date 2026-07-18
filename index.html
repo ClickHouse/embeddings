@@ -1149,11 +1149,14 @@ function hideRotPreview() { if (pvRAF) { cancelAnimationFrame(pvRAF); pvRAF = nu
 /// Rotation is applied ONCE, on release (not during the drag). The drag start->end vector d and the view
 /// normal span the rotation plane; the rotation axis is the in-screen vector perpendicular to d, i.e. (-dy,dx,0)
 /// (so the visible projection plane itself is never rotated — points tilt into/out of depth along the drag).
-let rotating = false, rStart = null, panning = false, panStart = null;
+let rotating = false, rStart = null, rMoved = 0, panning = false, panStart = null;
 async function endRotate(cx, cy, evForClick) {
     rotating = false; document.body.classList.remove('rotating');
+    /// click vs rotate is decided by the MAX movement during the drag (rMoved), not the start->end distance:
+    /// a rotation that curves back near where it began still has small start->end distance but large rMoved.
+    if (rMoved < 5) { hideRotPreview(); if (evForClick) click3D(evForClick); return; }   /// barely moved -> click -> report
     const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
-    if (len < 5) { hideRotPreview(); if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
+    if (len < 1) { hideRotPreview(); return; }   /// dragged but ended back at the start -> no net rotation (and not a click)
     R = matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);  /// pre-multiply: rotate in view space (angle slows with zoom)
     if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
@@ -1166,7 +1169,7 @@ map.getContainer().addEventListener('mousedown', (e) => {
     if (e.ctrlKey || e.metaKey) {                                   /// Ctrl/Cmd+drag pans the map (live) instead of rotating
         panning = true; panStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
     } else {
-        rotating = true; rStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
+        rotating = true; rStart = { x: e.clientX, y: e.clientY }; rMoved = 0; document.body.classList.add('rotating');
         hidePreview(); clearTagHl();   /// clear any hover full-image/tag highlight before it gets stuck behind the preview
         startPreview();
     }
@@ -1175,7 +1178,10 @@ addEventListener('mousemove', (e) => {
     if (panning) {   /// live pan (Leaflet drag is off in 3D so we drive panBy ourselves)
         map.panBy([panStart.x - e.clientX, panStart.y - e.clientY], { animate: false });
         panStart = { x: e.clientX, y: e.clientY };
-    } else if (rotating) requestPreview(e.clientX, e.clientY);   /// live rotation preview
+    } else if (rotating) {
+        rMoved = Math.max(rMoved, Math.hypot(e.clientX - rStart.x, e.clientY - rStart.y));   /// track max movement (click vs rotate)
+        requestPreview(e.clientX, e.clientY);   /// live rotation preview
+    }
 });
 addEventListener('mouseup', (e) => {
     if (panning) { panning = false; document.body.classList.remove('rotating'); updateURL(); }
@@ -1183,10 +1189,13 @@ addEventListener('mouseup', (e) => {
 });
 map.getContainer().addEventListener('touchstart', (e) => {
     if (!is3D() || e.touches.length !== 1) return;
-    rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; document.body.classList.add('rotating'); startPreview();
+    rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; rMoved = 0; document.body.classList.add('rotating'); startPreview();
 }, { passive: true });
 map.getContainer().addEventListener('touchmove', (e) => {
-    if (rotating && e.touches.length === 1) requestPreview(e.touches[0].clientX, e.touches[0].clientY);
+    if (rotating && e.touches.length === 1) {
+        rMoved = Math.max(rMoved, Math.hypot(e.touches[0].clientX - rStart.x, e.touches[0].clientY - rStart.y));
+        requestPreview(e.touches[0].clientX, e.touches[0].clientY);
+    }
 }, { passive: true });
 addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, t); } });
 /// click in 3D: nearest point in the current rotated projection (full scan) -> report
