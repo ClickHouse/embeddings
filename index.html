@@ -355,13 +355,15 @@ async function renderThumbTile(coords, canvas) {
         let sql = thumbCellsSQL(table);
         if (is3D()) { Object.assign(p, rotParams()); sql = thumbCellsSQL3d(table); }
         const cells = new Uint8Array(await (await chQuery(sql, p)).arrayBuffer());
-        let o = 0;
+        let o = 0; const cellMap = {};   /// 'px,py' -> md5 of the drawn thumbnail, for exact click lookup (no query)
         while (o + 4 < cells.length) {
             const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
             const len = cells[o++];               /// md5 <= 127 bytes -> single varint byte
             const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
+            cellMap[px + ',' + py] = md5;
             drawThumb(ctx, px, py, md5);
         }
+        canvas._cells = cellMap;
         hideError();
     } catch (e) { showError(String(e).slice(0, 500)); }
 }
@@ -369,6 +371,21 @@ function drawThumb(ctx, px, py, md5) {
     const im = new Image();
     im.onload = () => ctx.drawImage(im, px, py, 75, 75);
     im.src = thumbURL(md5);
+}
+/// The md5 of the thumbnail DRAWN at data-coord d (thumbs mode) — read straight from the rendered tiles'
+/// stored cell maps, so a click needs no query and hits exactly the displayed image (works in 2D and 3D).
+function thumbMd5At(d) {
+    if (!thumbLayer || !thumbLayer._tiles) return null;
+    for (const k in thumbLayer._tiles) {
+        const t = thumbLayer._tiles[k];
+        if (!t || !t.coords || !t.el || !t.el._cells) continue;
+        const ts = Math.pow(2, COORD_BITS - t.coords.z), tx0 = t.coords.x * ts, ty0 = t.coords.y * ts;
+        if (d.x < tx0 || d.x >= tx0 + ts || d.y < ty0 || d.y >= ty0 + ts) continue;   /// click outside this tile
+        const cell = Math.floor(ts * 75 / TILE);
+        const px = Math.floor((d.x - tx0) / cell) * 75, py = Math.floor((d.y - ty0) / cell) * 75;
+        return t.el._cells[px + ',' + py] || null;
+    }
+    return null;
 }
 function thumbURL(md5) {
     const sql = `WITH (SELECT thumb FROM ${THUMBS} WHERE md5 = {md5:String}) AS t
@@ -558,38 +575,23 @@ function latlngToData(latlng) {
 /// ---- Click -> nearest point -> report ----
 map.on('click', async (e) => {
     if (is3D()) return;                                  /// 3D handles click via its own drag/rotate mouseup
-    /// point-cloud: if the hover thumbnail is showing, target exactly that image (what the user sees)
-    if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }
-    const { table, xc, yc } = projCfg();
     const d = latlngToData(e.latlng);
+    /// thumbs: open the report for EXACTLY the clicked thumbnail — read from the rendered tiles, no query
+    if (mode === 'thumbs') { const m = thumbMd5At(d); if (m) showReport(m); else setStatus('no thumbnail here'); return; }
+    /// point-cloud: if the hover thumbnail is showing, target exactly that image (what the user sees)
+    if (hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }
+    const { table, xc, yc } = projCfg();
     setStatus('finding point…');
     try {
-        let sql, params;
-        if (mode === 'thumbs') {
-            /// Exact thumbnail clicked: reproduce the render's cell (intDiv math) in JS — all values
-            /// < 2^53 so JS is exact — and argMin(md5, cityHash64(md5)) over that cell = the drawn thumb.
-            const z = Math.min(Math.round(map.getZoom()), 20);   /// tile zoom (maxNativeZoom cap)
-            const ts = Math.pow(2, COORD_BITS - z);
-            const cell = Math.floor(ts * 75 / TILE);
-            const tx0 = Math.floor(d.x / ts) * ts, ty0 = Math.floor(d.y / ts) * ts;
-            const x0 = tx0 + Math.floor((d.x - tx0) / cell) * cell;
-            const y0 = ty0 + Math.floor((d.y - ty0) / cell) * cell;
-            const x1 = Math.min(x0 + cell, tx0 + ts), y1 = Math.min(y0 + cell, ty0 + ts);
-            sql = `SELECT argMin(md5, cityHash64(md5)) FROM ${table}
-                WHERE ${xc} >= {x0:UInt64} AND ${xc} < {x1:UInt64} AND ${yc} >= {y0:UInt64} AND ${yc} < {y1:UInt64} FORMAT TSV`;
-            params = { x0, y0, x1, y1 };
-        } else {
-            /// Point cloud: nearest visible point to the click.
-            const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
-            const r = Math.max(1, Math.round(px * 6));
-            sql = `SELECT md5 FROM ${table}
-                WHERE ${xc} BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
-                  AND ${yc} BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
-                ORDER BY pow(toInt64(${xc}) - toInt64({cx:UInt32}), 2) + pow(toInt64(${yc}) - toInt64({cy:UInt32}), 2) ASC
-                LIMIT 1 FORMAT TSV`;
-            params = { cx: d.x, cy: d.y, r };
-        }
-        const md5 = (await (await chQuery(sql, params)).text()).trim();
+        /// nearest visible point to the click
+        const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
+        const r = Math.max(1, Math.round(px * 6));
+        const sql = `SELECT md5 FROM ${table}
+            WHERE ${xc} BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
+              AND ${yc} BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
+            ORDER BY pow(toInt64(${xc}) - toInt64({cx:UInt32}), 2) + pow(toInt64(${yc}) - toInt64({cy:UInt32}), 2) ASC
+            LIMIT 1 FORMAT TSV`;
+        const md5 = (await (await chQuery(sql, { cx: d.x, cy: d.y, r })).text()).trim();
         if (md5) showReport(md5); else setStatus('no point near click');
     } catch (err) { showError(String(err).slice(0, 500)); }
 });
@@ -604,7 +606,7 @@ map.on('mousemove', (e) => {
     if (rotating || panning) return;                        /// overlay markers own #full there via their own mouseover/mouseout)
     const ll = e.latlng, cp = e.containerPoint;
     if (mode === 'points') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);           /// nearest point -> small thumbnail
-    else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll, cp), 100);            /// map thumbnail -> full preview
+    else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
 map.on('mouseout', () => { hideHover(); if (thumbsHover()) hidePreview(); });   /// leaving the map: clear the thumbs preview only
 map.on('movestart zoomstart', () => { hideHover(); hidePreview(); });           /// pan/zoom: clear any preview
@@ -635,24 +637,11 @@ function hoverPreview3D(cp) {   /// points mode: small thumbnail of the nearest 
     if (h.complete && h.naturalWidth) h.style.display = 'block';
 }
 /// thumbs mode: hovering an on-map thumbnail shows its full-image preview (+ author/license, see previewImg).
-/// 2D: exact drawn-cell representative (same math as the thumbs-mode click). 3D: nearest in the rotated subset.
-async function hoverThumb(latlng, cp) {
+/// Reads the exact drawn thumbnail's md5 from the rendered tiles (thumbMd5At) — no query, 2D and 3D alike.
+function hoverThumb(latlng) {
     if (mode !== 'thumbs' || reportActive) return;
-    if (is3D()) { const m = nearest3dMd5(cp); if (m) previewImg(m); return; }
-    const seq = ++hoverSeq, d = latlngToData(latlng);
-    const z = Math.min(Math.round(map.getZoom()), 20), ts = Math.pow(2, COORD_BITS - z), cell = Math.floor(ts * 75 / TILE);
-    const { table, xc, yc } = projCfg();
-    const tx0 = Math.floor(d.x / ts) * ts, ty0 = Math.floor(d.y / ts) * ts;
-    const x0 = tx0 + Math.floor((d.x - tx0) / cell) * cell, y0 = ty0 + Math.floor((d.y - ty0) / cell) * cell;
-    const x1 = Math.min(x0 + cell, tx0 + ts), y1 = Math.min(y0 + cell, ty0 + ts);
-    const sql = `SELECT argMin(md5, cityHash64(md5)) FROM ${table}
-        WHERE ${xc} >= {x0:UInt64} AND ${xc} < {x1:UInt64} AND ${yc} >= {y0:UInt64} AND ${yc} < {y1:UInt64} FORMAT TSV`;
-    try {
-        const url = chURL(`default_format=TSV&param_x0=${x0}&param_y0=${y0}&param_x1=${x1}&param_y1=${y1}`, USER_THUMBS);
-        const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
-        if (seq !== hoverSeq || mode !== 'thumbs' || reportActive || !md5) return;
-        previewImg(md5);
-    } catch (e) { /* ignore transient hover errors */ }
+    const m = thumbMd5At(latlngToData(latlng));
+    if (m) previewImg(m);
 }
 async function hoverPreview(latlng, cp) {
     if (mode !== 'points') return;
@@ -1168,28 +1157,10 @@ map.getContainer().addEventListener('touchmove', (e) => {
     if (rotating && e.touches.length === 1) requestPreview(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
 addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, t); } });
-/// click a thumbnail in UMAP 3D thumbs mode: report for EXACTLY the drawn thumbnail (the 75px cell's
-/// argMin(md5,cityHash64) representative in the rotated projection — same math as renderThumbTile/thumbCellsSQL3d).
-async function clickThumb3D(e) {
-    const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
-    const z = Math.min(Math.round(map.getZoom()), 20), ts = Math.pow(2, COORD_BITS - z), cell = Math.floor(ts * 75 / TILE);
-    const tx0 = Math.floor(d.x / ts) * ts, ty0 = Math.floor(d.y / ts) * ts;
-    const x0 = tx0 + Math.floor((d.x - tx0) / cell) * cell, y0 = ty0 + Math.floor((d.y - ty0) / cell) * cell;
-    const x1 = Math.min(x0 + cell, tx0 + ts), y1 = Math.min(y0 + cell, ty0 + ts);
-    const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
-    const PX = `toUInt32(least(1.,greatest(0.,({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
-    const PY = `toUInt32(least(1.,greatest(0.,({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
-    const sql = `SELECT argMin(md5, cityHash64(md5)) FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM mmcommons.umap_${dataset}_3d)
-        WHERE PX >= {x0:UInt64} AND PX < {x1:UInt64} AND PY >= {y0:UInt64} AND PY < {y1:UInt64} FORMAT TSV`;
-    setStatus('finding thumbnail…');
-    try {
-        const md5 = (await (await chQuery(sql, { ...rotParams(), x0, y0, x1, y1 }, 'TSV')).text()).trim();
-        if (md5) showReport(md5); else setStatus('no thumbnail here');
-    } catch (err) { showError(String(err).slice(0, 500)); }
-}
 /// click in 3D: nearest point in the current rotated projection (full scan) -> report
 async function click3D(e) {
-    if (mode === 'thumbs' && !reportActive) return clickThumb3D(e);   /// thumbs: report for the exact clicked thumbnail
+    /// thumbs: open the report for EXACTLY the clicked thumbnail — read from the rendered tiles, no query
+    if (mode === 'thumbs' && !reportActive) { const m = thumbMd5At(latlngToData(map.mouseEventToLatLng(e))); if (m) showReport(m); else setStatus('no thumbnail here'); return; }
     if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }   /// click the hovered image (instant)
     const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
