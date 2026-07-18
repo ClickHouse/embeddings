@@ -531,6 +531,14 @@ function sizeOverlay() {
     }
 }
 map.on('zoomend', sizeOverlay);
+/// On dataset/projection switch: fit the view to the top-K points if a report is open, else reset to the
+/// initial zoomed-out view. fitOverlayNext defers the fit until a report reload's overlay has been placed.
+let fitOverlayNext = false;
+function resetView() { map.fitBounds(worldBounds); }   /// initial full-extent view (same as on load)
+function fitToOverlay() {
+    if (!reportActive || !overlayPts.length) return;
+    map.fitBounds(L.latLngBounds(overlayPts.map(p => p.ll)), { padding: [60, 60], maxZoom: 14 });
+}
 
 /// data coords (0..2^32) from a Leaflet CRS.Simple latlng
 function latlngToData(latlng) {
@@ -873,7 +881,8 @@ async function runSimilar(more) {
             for (const r of rows) next.push(thumbImg(r.md5, false));
             grid.replaceChildren(...next);
             grid.classList.remove('loading');
-            clearOverlay(); addOverlayThumbs(rows);                        /// refresh the on-map overlay
+            clearOverlay();                                               /// refresh the on-map overlay
+            addOverlayThumbs(rows).then(() => { if (fitOverlayNext) { fitOverlayNext = false; fitToOverlay(); } });   /// fit after a dataset switch
             repLoaded = rows.length;
             repMd5s = rows.map(r => r.md5); lastRows = rows.slice();
         }
@@ -1002,8 +1011,10 @@ buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     rep.dims = Math.min(rep.dims, repMaxDims());   /// keep the selected #dims if the new embedding supports it, else clamp to its max
     if (is3D()) loadPreview(dataset);              /// warm the preview subset for the new dataset
     makeLayer();
-    /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset
-    if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
+    /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset and fit to it;
+    /// otherwise reset to the initial zoomed-out view (the new dataset's layout differs from the old one)
+    if (reportActive && curReport) { fitOverlayNext = true; showReport(curReport); }
+    else resetView();
     updateURL();
 });
 buildSwitch('modes', ['points', 'thumbs'], mode, k => {
@@ -1015,7 +1026,9 @@ buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
     proj = k;
     set3DMode(is3D());
     hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
-    if (reportActive) { clearOverlay(); addOverlayThumbs(lastRows); }   /// re-place the top-K overlay for the new projection (incl. 3D)
+    /// re-place the top-K overlay for the new projection (incl. 3D) and fit to it; else reset to the full view
+    if (reportActive) { clearOverlay(); addOverlayThumbs(lastRows).then(fitToOverlay); }
+    else resetView();
     updateURL();
 });
 /// UMAP 3D: drag rotates the cloud, Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
