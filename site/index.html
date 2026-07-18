@@ -79,6 +79,7 @@
         max-height: 24vh; overflow-y: auto; line-height: 1.25; }
     body.report-open #tagcloud { right: min(40%, 640px); }   /* match the map (left panel) width, centre within it */
     #tagcloud .t { display: inline-block; margin: 0 .3em; white-space: nowrap; color: #fff; }
+    #tagcloud .t.hl { text-decoration: underline; text-underline-offset: 2px; }   /* image hover -> its tags */
 </style>
 </head>
 <body>
@@ -129,6 +130,7 @@ let repTarget = 0;      /// desired # of result images (grows 2x on scroll)
 let repLoaded = 0;      /// # of result images currently shown
 let repMd5s = [];       /// md5s of the current top-K results (for the user-tag cloud)
 let tagSeq = 0;         /// guards stale tag-cloud responses
+let md5ToTagSpans = new Map();   /// md5 -> [its tag <span>s], for thumbnail-hover tag underlining
 let repLoading = false; /// a scan is in flight (guards scroll-triggered load-more)
 let repMore = true;     /// more results may exist (the last batch was full)
 const MAX_RESULTS = 3000;   /// safety cap on rendered thumbnails
@@ -308,8 +310,8 @@ function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail markers
         const ll = dataToLatLng(+r.x, +r.y);
         const marker = L.marker(ll, { icon: overlayIcon(r.md5, MAX_THUMB), keyboard: false, riseOnHover: true })
             .on('click', () => showReport(r.md5))
-            .on('mouseover', () => previewImg(r.md5))
-            .on('mouseout', hidePreview)
+            .on('mouseover', () => { previewImg(r.md5); highlightTags(r.md5); })
+            .on('mouseout', () => { hidePreview(); clearTagHl(); })
             .addTo(topkLayer);
         overlayPts.push({ md5: r.md5, ll, marker, size: MAX_THUMB });
     }
@@ -513,6 +515,7 @@ async function updateTagCloud() {
         const smin = Math.sqrt(min), smax = Math.sqrt(max);   /// font size ~ sqrt(count)
         tags.sort((a, b) => a[0].localeCompare(b[0]));   /// display alphabetically; font size still by frequency
         el.replaceChildren();
+        md5ToTagSpans = new Map();
         for (const [t, c] of tags) {                    /// size + colour by frequency: most -> white, yellow, orange <- least
             const f = max > min ? (c - min) / (max - min) : 1;                    /// colour ramp (linear)
             const fs = smax > smin ? (Math.sqrt(c) - smin) / (smax - smin) : 1;   /// size ~ sqrt(count)
@@ -523,6 +526,7 @@ async function updateTagCloud() {
             s.style.color = f >= 0.5 ? `rgb(255,255,${Math.round(255*(2*f-1))})`   /// white .. yellow
                                      : `rgb(255,${Math.round(165+180*f)},0)`;       /// yellow .. orange
             s.onmouseenter = () => dimExcept(md5set);   /// hover a tag -> dim images that lack it (grid + map)
+            for (const m of md5set) { let a = md5ToTagSpans.get(m); if (!a) md5ToTagSpans.set(m, a = []); a.push(s); }
             el.appendChild(s);
         }
         el.onmouseleave = clearDim;
@@ -546,6 +550,14 @@ function dimExcept(md5set) {
 }
 function clearDim() {
     document.querySelectorAll('img.dimmed').forEach(img => img.classList.remove('dimmed'));
+}
+/// thumbnail hover: underline the tags of the hovered image (reverse of tag-hover dimming)
+function highlightTags(md5) {
+    const spans = md5ToTagSpans.get(md5);
+    if (spans) for (const s of spans) s.classList.add('hl');
+}
+function clearTagHl() {
+    document.querySelectorAll('#tagcloud .t.hl').forEach(s => s.classList.remove('hl'));
 }
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
 async function runSimilar(more) {
@@ -660,8 +672,8 @@ function thumbImg(md5, isQuery) {
     img.title = isQuery ? 'query · hover to preview' : md5 + ' · click to search from here';
     if (isQuery) img.style.borderColor = '#ff0';
     else { img.dataset.md5 = md5; img.onclick = () => showReport(md5); }   /// data-md5 -> tag-cloud dimming
-    img.onmouseenter = () => previewImg(md5);
-    img.onmouseleave = hidePreview;
+    img.onmouseenter = () => { previewImg(md5); highlightTags(md5); };   /// hover a thumb -> underline its tags
+    img.onmouseleave = () => { hidePreview(); clearTagHl(); };
     return img;
 }
 function previewImg(md5) {
