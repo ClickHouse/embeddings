@@ -115,7 +115,8 @@ const HOST = 'https://hvdvsqo23t.us-east-2.aws.clickhouse-staging.com:8443';
 const USER = 'website';                 /// heavy queries: tiles, top-100 search, click lookups
 const USER_THUMBS = 'website_thumbs';   /// point queries: thumbnail image loads (shares the password)
 const PASS = '';                        /// website / website_thumbs use an empty password (sha256 of empty string)
-const THUMBS = 'mmcommons.image_thumbs2';
+const THUMBS = 'mmcommons.image_thumbs2_fast';   /// same data as image_thumbs2 but tuned for point lookups
+                                                 /// (256 KiB granules/compress-blocks): ~45x less I/O & ~35% faster per thumb
 const S3 = 'https://multimedia-commons.s3.us-west-2.amazonaws.com/data/images';
 const TILE = 1024;                 /// tile pixel size
 const COORD_BITS = 32;             /// x,y live in [0, 2^32)
