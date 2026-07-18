@@ -874,6 +874,7 @@ function offsetControls() {
 }
 offsetControls();
 addEventListener('resize', () => { offsetControls(); if (reportActive) fitPanelWidth(); });
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && reportActive) hideReport(); });   /// Esc closes the top-K panel
 
 makeLayer();
 
