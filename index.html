@@ -568,6 +568,13 @@ map.on('zoomend', sizeOverlay);
 /// On dataset/projection switch: fit the view to the top-K points if a report is open, else reset to the
 /// initial zoomed-out view. fitOverlayNext defers the fit until a report reload's overlay has been placed.
 let fitOverlayNext = false;
+/// A deferred fit (fires after the async report reload/overlay placement) must be cancelled if the user
+/// has meanwhile panned/zoomed/rotated the map — don't yank the view out from under them. Set true on any
+/// map input; armFit() resets it at the switch that scheduled the fit; the fit only runs if still false.
+let mapTouchedSinceSwitch = false;
+['mousedown', 'wheel', 'touchstart'].forEach(ev =>
+    map.getContainer().addEventListener(ev, () => { mapTouchedSinceSwitch = true; }, { passive: true }));
+function armFit() { mapTouchedSinceSwitch = false; }
 function resetView() { map.fitBounds(worldBounds); }   /// initial full-extent view (same as on load)
 function fitToOverlay() {
     if (!reportActive || !overlayPts.length) return;
@@ -890,7 +897,7 @@ async function runSimilar(more) {
             grid.replaceChildren(...next);
             grid.classList.remove('loading');
             clearOverlay();                                               /// refresh the on-map overlay
-            addOverlayThumbs(rows).then(() => { if (fitOverlayNext) { fitOverlayNext = false; fitToOverlay(); } });   /// fit after a dataset switch
+            addOverlayThumbs(rows).then(() => { if (fitOverlayNext) { fitOverlayNext = false; if (!mapTouchedSinceSwitch) fitToOverlay(); } });   /// fit after a dataset switch, unless the user moved the map meanwhile
             repLoaded = rows.length;
             repMd5s = rows.map(r => r.md5); lastRows = rows.slice();
         }
@@ -1030,7 +1037,7 @@ buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     makeLayer();
     /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset and fit to it;
     /// otherwise reset to the initial zoomed-out view (the new dataset's layout differs from the old one)
-    if (reportActive && curReport) { fitOverlayNext = true; showReport(curReport); }
+    if (reportActive && curReport) { armFit(); fitOverlayNext = true; showReport(curReport); }
     else resetView();
     updateURL();
 });
@@ -1044,7 +1051,7 @@ buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
     set3DMode(is3D());
     hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
     /// re-place the top-K overlay for the new projection (incl. 3D) and fit to it; else reset to the full view
-    if (reportActive) { clearOverlay(); addOverlayThumbs(lastRows).then(fitToOverlay); }
+    if (reportActive) { armFit(); clearOverlay(); addOverlayThumbs(lastRows).then(() => { if (!mapTouchedSinceSwitch) fitToOverlay(); }); }
     else resetView();
     updateURL();
 });
