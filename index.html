@@ -68,8 +68,13 @@
     /* non-modal full-size preview shown on hover, pinned to the bottom-left corner */
     #full { position: absolute; left: 10px; bottom: 10px; z-index: 1003;
         display: none; pointer-events: none; }
-    #full img { max-width: 42vw; max-height: 66vh; box-shadow: 0 0 40px #000;
+    #full img { display: block; max-width: 42vw; max-height: 66vh; box-shadow: 0 0 40px #000;
         border: 2px solid #ff0; background: #000; }
+    #full-meta { max-width: 42vw; margin-top: 2px; padding: 2px 5px; box-sizing: border-box;
+        background: rgba(0,0,0,.8); color: #ddd; font-size: 12px; line-height: 1.3;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #full-meta:empty { display: none; }
+    #full-meta .lic { color: #8bc34a; }
     #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
         background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
     a { color: #90caf9; }
@@ -98,7 +103,7 @@
 </div>
 <div id="tagcloud"></div>
 <div id="report"><div id="report-body"></div></div>
-<div id="full"><img id="full-img"></div>
+<div id="full"><img id="full-img"><div id="full-meta"></div></div>
 <img id="hover">
 
 <div id="error"></div>
@@ -579,16 +584,18 @@ let hoverTimer = null, hoverSeq = 0, hoverMd5 = null;
 function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null; document.getElementById('hover').style.display = 'none'; }
 map.on('mousemove', (e) => {
     hideHover();                                             /// moving -> hide, restart the dwell timer
-    if (mode !== 'points' || rotating || panning) return;   /// no hover while rotating/panning the 3D cloud
+    if (mode === 'thumbs') hidePreview();                   /// also hide the thumbs full-image preview while moving
+    if (rotating || panning) return;                        /// no hover while rotating/panning the 3D cloud
     const ll = e.latlng, cp = e.containerPoint;
-    hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);
+    if (mode === 'points') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);           /// nearest point -> small thumbnail
+    else if (mode === 'thumbs' && !reportActive) hoverTimer = setTimeout(() => hoverThumb(ll, cp), 100);   /// map thumbnail -> full preview
 });
-map.on('mouseout movestart zoomstart', hideHover);
-/// UMAP 3D hover: find the nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current
-/// rotation) — instant, no ~1s full scan. Less precise than the 2D server lookup, so ignore matches too far off.
-function hoverPreview3D(cp) {
+map.on('mouseout movestart zoomstart', () => { hideHover(); hidePreview(); });
+/// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
+/// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
+function nearest3dMd5(cp) {
     const d = previewData[dataset];
-    if (!d || d === 'loading') { loadPreview(dataset); return; }
+    if (!d || d === 'loading') { loadPreview(dataset); return null; }
     const t = previewTransform(), { n, nx, ny, nz, md5 } = d;
     const r0 = R[0][0], r1 = R[0][1], r2 = R[0][2], r3 = R[1][0], r4 = R[1][1], r5 = R[1][2];
     let best = -1, bestD = Infinity;
@@ -597,14 +604,38 @@ function hoverPreview3D(cp) {
         const ex = (t.SX * (r0*X + r1*Y + r2*Z) + t.OX) - cp.x, ey = (t.SY * (r3*X + r4*Y + r5*Z) + t.OY) - cp.y;
         const dd = ex*ex + ey*ey; if (dd < bestD) { bestD = dd; best = i; }
     }
-    if (best < 0 || bestD > 40*40) return;                  /// nothing near enough (subset is sparse when zoomed in)
-    const seq = ++hoverSeq, m = md5[best];
+    return (best >= 0 && bestD <= 40*40) ? md5[best] : null;   /// subset is sparse when zoomed in -> no match
+}
+function hoverPreview3D(cp) {   /// points mode: small thumbnail of the nearest point
+    const m = nearest3dMd5(cp);
+    if (!m) return;
+    const seq = ++hoverSeq;
     hoverMd5 = m;                                            /// a click uses this exact image (see click3D)
     const h = document.getElementById('hover');
     h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = m;
     h.onload = () => { if (seq === hoverSeq && mode === 'points' && is3D()) h.style.display = 'block'; };
     h.src = thumbURL(m);
     if (h.complete && h.naturalWidth) h.style.display = 'block';
+}
+/// thumbs mode: hovering an on-map thumbnail shows its full-image preview (+ author/license, see previewImg).
+/// 2D: exact drawn-cell representative (same math as the thumbs-mode click). 3D: nearest in the rotated subset.
+async function hoverThumb(latlng, cp) {
+    if (mode !== 'thumbs' || reportActive) return;
+    if (is3D()) { const m = nearest3dMd5(cp); if (m) previewImg(m); return; }
+    const seq = ++hoverSeq, d = latlngToData(latlng);
+    const z = Math.min(Math.round(map.getZoom()), 20), ts = Math.pow(2, COORD_BITS - z), cell = Math.floor(ts * 75 / TILE);
+    const { table, xc, yc } = projCfg();
+    const tx0 = Math.floor(d.x / ts) * ts, ty0 = Math.floor(d.y / ts) * ts;
+    const x0 = tx0 + Math.floor((d.x - tx0) / cell) * cell, y0 = ty0 + Math.floor((d.y - ty0) / cell) * cell;
+    const x1 = Math.min(x0 + cell, tx0 + ts), y1 = Math.min(y0 + cell, ty0 + ts);
+    const sql = `SELECT argMin(md5, cityHash64(md5)) FROM ${table}
+        WHERE ${xc} >= {x0:UInt64} AND ${xc} < {x1:UInt64} AND ${yc} >= {y0:UInt64} AND ${yc} < {y1:UInt64} FORMAT TSV`;
+    try {
+        const url = chURL(`default_format=TSV&param_x0=${x0}&param_y0=${y0}&param_x1=${x1}&param_y1=${y1}`, USER_THUMBS);
+        const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
+        if (seq !== hoverSeq || mode !== 'thumbs' || reportActive || !md5) return;
+        previewImg(md5);
+    } catch (e) { /* ignore transient hover errors */ }
 }
 async function hoverPreview(latlng, cp) {
     if (mode !== 'points') return;
@@ -888,11 +919,29 @@ function thumbImg(md5, isQuery) {
     img.onmouseleave = () => { hidePreview(); clearTagHl(); };
     return img;
 }
+let metaSeq = 0;
 function previewImg(md5) {
     document.getElementById('full-img').src = fullURL(md5);
     document.getElementById('full').style.display = 'block';
+    loadMeta(md5);                                           /// author + license caption from yfcc_metadata
 }
-function hidePreview() { document.getElementById('full').style.display = 'none'; }
+/// Look up author/license by the compact (stupidHex) md5 — served fast by the md5_stupid projection on
+/// yfcc_metadata (see scripts/setup_metadata_projection.py). Routed to website_thumbs, no parallel replicas.
+async function loadMeta(md5) {
+    const meta = document.getElementById('full-meta'), seq = ++metaSeq;
+    meta.textContent = '';
+    const sql = `SELECT user_nickname, license_name, license_url FROM mmcommons.yfcc_metadata
+        WHERE md5_stupid = {m:String} LIMIT 1 FORMAT JSONCompactEachRow`;
+    try {
+        const url = chURL(`enable_parallel_replicas=0&default_format=JSONCompactEachRow&param_m=${encodeURIComponent(md5)}`, USER_THUMBS);
+        const txt = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
+        if (seq !== metaSeq || !txt) return;                /// a newer preview superseded this lookup
+        const [author, lic, licUrl] = JSON.parse(txt.split('\n')[0]);
+        meta.textContent = author ? '© ' + author : '';
+        if (lic) { if (author) meta.append(' · '); const s = document.createElement('span'); s.className = 'lic'; s.textContent = lic; s.title = licUrl || ''; meta.append(s); }
+    } catch (e) { /* ignore transient metadata errors */ }
+}
+function hidePreview() { document.getElementById('full').style.display = 'none'; document.getElementById('full-meta').textContent = ''; }
 function hideReport() {
     document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
     reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
