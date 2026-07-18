@@ -972,8 +972,8 @@ async function endRotate(cx, cy, evForClick) {
     const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
     if (len < 5) { hidePreview(); if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
     R = matMul(axisAngle(-dy / len, dx / len, 0, len * 0.006), R);  /// pre-multiply: rotate in view space
-    drawPreview(cx, cy);                                            /// hold the final orientation on-screen...
-    const done = redraw(); updateURL();
+    drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
+    const done = redraw(); updateURL();                            /// NOT drawPreview(cx,cy), which would re-apply the drag)
     try { await done; } catch (e) {}
     if (!rotating) hidePreview();                                   /// ...until the server tiles catch up (unless a new drag started)
 }
