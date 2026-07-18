@@ -597,15 +597,17 @@ map.on('click', async (e) => {
 /// ---- Point-cloud hover: after the mouse rests ~100ms, show the nearest image's thumbnail ----
 let hoverTimer = null, hoverSeq = 0, hoverMd5 = null;
 function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null; document.getElementById('hover').style.display = 'none'; }
+const thumbsHover = () => mode === 'thumbs' && !reportActive;   /// map-thumbnail hover is active only outside topK
 map.on('mousemove', (e) => {
     hideHover();                                             /// moving -> hide, restart the dwell timer
-    if (mode === 'thumbs') hidePreview();                   /// also hide the thumbs full-image preview while moving
-    if (rotating || panning) return;                        /// no hover while rotating/panning the 3D cloud
+    if (thumbsHover()) hidePreview();                       /// hide the thumbs full-image preview while moving (NOT in topK: the
+    if (rotating || panning) return;                        /// overlay markers own #full there via their own mouseover/mouseout)
     const ll = e.latlng, cp = e.containerPoint;
     if (mode === 'points') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);           /// nearest point -> small thumbnail
-    else if (mode === 'thumbs' && !reportActive) hoverTimer = setTimeout(() => hoverThumb(ll, cp), 100);   /// map thumbnail -> full preview
+    else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll, cp), 100);            /// map thumbnail -> full preview
 });
-map.on('mouseout movestart zoomstart', () => { hideHover(); hidePreview(); });
+map.on('mouseout', () => { hideHover(); if (thumbsHover()) hidePreview(); });   /// leaving the map: clear the thumbs preview only
+map.on('movestart zoomstart', () => { hideHover(); hidePreview(); });           /// pan/zoom: clear any preview
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
 function nearest3dMd5(cp) {
@@ -1166,8 +1168,28 @@ map.getContainer().addEventListener('touchmove', (e) => {
     if (rotating && e.touches.length === 1) requestPreview(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
 addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, t); } });
+/// click a thumbnail in UMAP 3D thumbs mode: report for EXACTLY the drawn thumbnail (the 75px cell's
+/// argMin(md5,cityHash64) representative in the rotated projection — same math as renderThumbTile/thumbCellsSQL3d).
+async function clickThumb3D(e) {
+    const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
+    const z = Math.min(Math.round(map.getZoom()), 20), ts = Math.pow(2, COORD_BITS - z), cell = Math.floor(ts * 75 / TILE);
+    const tx0 = Math.floor(d.x / ts) * ts, ty0 = Math.floor(d.y / ts) * ts;
+    const x0 = tx0 + Math.floor((d.x - tx0) / cell) * cell, y0 = ty0 + Math.floor((d.y - ty0) / cell) * cell;
+    const x1 = Math.min(x0 + cell, tx0 + ts), y1 = Math.min(y0 + cell, ty0 + ts);
+    const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
+    const PX = `toUInt32(least(1.,greatest(0.,({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const PY = `toUInt32(least(1.,greatest(0.,({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
+    const sql = `SELECT argMin(md5, cityHash64(md5)) FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM mmcommons.umap_${dataset}_3d)
+        WHERE PX >= {x0:UInt64} AND PX < {x1:UInt64} AND PY >= {y0:UInt64} AND PY < {y1:UInt64} FORMAT TSV`;
+    setStatus('finding thumbnail…');
+    try {
+        const md5 = (await (await chQuery(sql, { ...rotParams(), x0, y0, x1, y1 }, 'TSV')).text()).trim();
+        if (md5) showReport(md5); else setStatus('no thumbnail here');
+    } catch (err) { showError(String(err).slice(0, 500)); }
+}
 /// click in 3D: nearest point in the current rotated projection (full scan) -> report
 async function click3D(e) {
+    if (mode === 'thumbs' && !reportActive) return clickThumb3D(e);   /// thumbs: report for the exact clicked thumbnail
     if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }   /// click the hovered image (instant)
     const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
