@@ -492,7 +492,7 @@ async function updateTagCloud() {
     const seq = ++tagSeq;
     const inlist = md5s.map(m => `'${m}'`).join(',');   /// md5s are hex (stupidHex) -> safe to inline
     const sql = `SELECT tag, count() c FROM (SELECT arrayJoin(user_tags) tag
-        FROM mmcommons.tags_by_md5 WHERE md5 IN (${inlist})) GROUP BY tag ORDER BY c DESC, tag LIMIT 60 FORMAT JSONCompactEachRow`;
+        FROM mmcommons.tags_by_md5 WHERE md5 IN (${inlist})) GROUP BY tag FORMAT JSONCompactEachRow`;
     try {
         /// PK seek on md5 -> no PR; use the query cache, allowing arrayJoin (row-generating -> non-deterministic, else Code 704)
         const resp = await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1&query_cache_nondeterministic_function_handling=save'),
