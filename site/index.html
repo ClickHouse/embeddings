@@ -73,7 +73,7 @@
     .leaflet-control-attribution a { color: #ff0 !important; }
     /* user-tag cloud for the current top-K results, pinned under the top panel over the map */
     #tagcloud { position: absolute; left: 0; right: 0; z-index: 900; display: none;
-        background: rgba(15,15,15,.85); padding: .3em .6em; text-align: center;
+        background: rgba(15,15,15,.85); padding: .3em .6em .3em 52px; text-align: center;   /* left pad clears the +/- zoom control */
         max-height: 24vh; overflow-y: auto; line-height: 1.25; }
     body.report-open #tagcloud { right: min(40%, 640px); }   /* match the map (left panel) width, centre within it */
     #tagcloud .t { display: inline-block; margin: 0 .3em; white-space: nowrap; color: #fff; }
