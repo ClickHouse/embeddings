@@ -4,7 +4,7 @@ Datasets, pipelines, and an interactive explorer for large-scale image/text embe
 built on ClickHouse. Companion in spirit to [adsb.exposed](https://github.com/ClickHouse/adsb.exposed)
 and [reversedns.space](https://github.com/ClickHouse/reversedns.space).
 
-## Explorer website (`site/index.html`)
+## Explorer website (`index.html`)
 
 A zoomable, tile-rendered map of an embedding "sphere" — the whole corpus projected to 2-D via a
 random Hadamard rotation, colored by density (OKLCH lightness) and a third projected axis (OKLCH hue).

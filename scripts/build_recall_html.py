@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Build results/recall.json + site/recall.html (self-contained heatmap viewer) from results/recall.csv
+# Build results/recall.json + recall.html (self-contained heatmap viewer) from results/recall.csv
 import csv, json, os
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 rows = []
@@ -200,5 +200,5 @@ _bar.addEventListener('mousemove', e => {
 _bar.addEventListener('mouseleave', _clear);
 </script></body></html>
 '''
-open(os.path.join(BASE, 'site/recall.html'), 'w').write(HTML.replace('__DATA__', data))
-print('wrote results/recall.json (%d rows) and site/recall.html' % len(rows))
+open(os.path.join(BASE, 'recall.html'), 'w').write(HTML.replace('__DATA__', data))
+print('wrote results/recall.json (%d rows) and recall.html' % len(rows))
