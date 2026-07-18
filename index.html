@@ -41,6 +41,7 @@
     #hint3d { display: none; color: #999; }                          /* only in UMAP 3D (body.proj3d) */
     body.proj3d #hint3d { display: inline; }
     #status { margin-left: auto; color: #8bc34a; font-family: monospace; }
+    #zoom { color: #999; font-family: monospace; }
     #report { position: absolute; top: 0; right: 0; bottom: 0; width: 40%; max-width: 640px;
         z-index: 1002; background: rgba(15,15,15,.97); overflow-y: auto; display: none;
         scrollbar-gutter: stable; box-shadow: -4px 0 20px rgba(0,0,0,.7); }
@@ -102,6 +103,7 @@
     <div class="grp"><label>projection</label><span id="projs"></span></div>
     <span id="hint3d">drag to rotate, Ctrl/Cmd+drag to pan</span>
     <span id="status">ready</span>
+    <span id="zoom" title="map zoom level"></span>
 </div>
 <div id="tagcloud"></div>
 <div id="report"><div id="report-body"></div></div>
@@ -1191,14 +1193,12 @@ offsetControls();
 addEventListener('resize', () => { offsetControls(); if (reportActive) fitPanelWidth(); });
 addEventListener('keydown', (e) => { if (e.key === 'Escape' && reportActive) hideReport(); });   /// Esc closes the top-K panel
 
-makeLayer();
-
-/// restore the map view + reopen the report (after the layer exists)
-if (urlp.get('md5')) showReport(urlp.get('md5'));
-if (urlp.has('z') && urlp.has('x') && urlp.has('y'))
-    map.setView(dataToLatLng(+urlp.get('x'), +urlp.get('y')), +urlp.get('z'));
-
-/// serialize state -> URL hash (bookmarkable/shareable); replaceState so it doesn't spam history
+/// ---- URL hash <-> history + zoom label (defined before the restore below, which calls updateURL) ----
+/// "Significant" state (dataset, mode, projection, open report + its params) makes a NEW history entry so
+/// Back/Forward step through those; view-only changes (pan/zoom/rotation) and Back/Forward restores update
+/// the current entry in place (replaceState) — so scrolling around doesn't flood history.
+function sigOf(p) { return ['ds', 'mode', 'proj', 'md5', 'type', 'rot', 'bits', 'dims'].map(k => p.get(k) || '').join('|'); }
+let lastSig = null, restoring = false;
 function updateURL() {
     const c = latlngToData(map.getCenter());
     const p = new URLSearchParams();
@@ -1209,9 +1209,51 @@ function updateURL() {
         p.set('md5', curReport); p.set('type', rep.type); p.set('rot', rep.rot);
         p.set('bits', rep.bits); p.set('dims', rep.dims);
     }
-    history.replaceState(null, '', '#' + p.toString());
+    const hash = '#' + p.toString(), sig = sigOf(p);
+    if (!restoring && lastSig !== null && sig !== lastSig) history.pushState(null, '', hash);   /// discrete change -> new entry
+    else history.replaceState(null, '', hash);                                                  /// view-only / restore -> in place
+    lastSig = sig;
 }
+function selectSwitch(id, value) {   /// reflect a value in an already-built switch (no rebuild)
+    for (const c of document.getElementById(id).children) c.classList.toggle('sel', c.textContent === value);
+}
+/// re-apply the full state from a URL hash — for Back/Forward. restoring=true so nested updateURL() calls replace.
+function applyState(urlp) {
+    restoring = true;
+    try {
+        const nd = DATASETS[urlp.get('ds')] ? urlp.get('ds') : dataset;
+        const nm = (urlp.get('mode') === 'points' || urlp.get('mode') === 'thumbs') ? urlp.get('mode') : mode;
+        const np = ['linear', 'UMAP', 'UMAP 3D'].includes(urlp.get('proj')) ? urlp.get('proj') : proj;
+        const dsChanged = nd !== dataset;
+        dataset = nd; mode = nm; proj = np;
+        selectSwitch('datasets', dataset); selectSwitch('modes', mode); selectSwitch('projs', proj);
+        R = [[1,0,0],[0,1,0],[0,0,1]];
+        if (is3D() && urlp.get('r3d')) { const a = urlp.get('r3d').split(',').map(Number);
+            if (a.length === 6 && a.every(Number.isFinite)) R = [[a[0],a[1],a[2]], [a[3],a[4],a[5]], cross([a[0],a[1],a[2]], [a[3],a[4],a[5]])]; }
+        if (urlp.get('type')) rep.type = urlp.get('type');
+        if (urlp.get('rot')) rep.rot = urlp.get('rot');
+        if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
+        if (+urlp.get('dims')) rep.dims = +urlp.get('dims');
+        set3DMode(is3D());
+        if (dsChanged) makeLayer(); else { applyMode(); redraw(); }
+        const md5 = urlp.get('md5');
+        if (md5) showReport(md5); else if (reportActive) hideReport();
+        if (urlp.has('z') && urlp.has('x') && urlp.has('y')) map.setView(dataToLatLng(+urlp.get('x'), +urlp.get('y')), +urlp.get('z'));
+        updateZoomLabel();
+        updateURL();   /// normalize hash + sync lastSig (restoring -> replace, no new entry)
+    } finally { restoring = false; }
+}
+addEventListener('popstate', () => applyState(new URLSearchParams(location.hash.slice(1))));
+function updateZoomLabel() { const z = map.getZoom(); document.getElementById('zoom').textContent = 'zoom ' + (Number.isInteger(z) ? z : z.toFixed(1)); }
+map.on('zoomend', updateZoomLabel);
 map.on('moveend zoomend', updateURL);
+
+makeLayer();
+/// restore the map view + reopen the report (after the layer exists)
+if (urlp.get('md5')) showReport(urlp.get('md5'));
+if (urlp.has('z') && urlp.has('x') && urlp.has('y'))
+    map.setView(dataToLatLng(+urlp.get('x'), +urlp.get('y')), +urlp.get('z'));
+updateZoomLabel();
 updateURL();
 </script>
 </body>
