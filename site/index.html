@@ -75,6 +75,7 @@
     #tagcloud { position: absolute; left: 0; right: 0; z-index: 900; display: none;
         background: rgba(15,15,15,.85); padding: .3em .6em; text-align: center;
         max-height: 24vh; overflow-y: auto; line-height: 1.25; }
+    body.report-open #tagcloud { right: min(40%, 640px); }   /* match the map (left panel) width, centre within it */
     #tagcloud .t { display: inline-block; margin: 0 .3em; white-space: nowrap; color: #fff; }
 </style>
 </head>
@@ -505,12 +506,13 @@ async function updateTagCloud() {
         const max = Math.max(...cnts), min = Math.min(...cnts);
         tags.sort((a, b) => a[0].localeCompare(b[0]));   /// display alphabetically; font size still by frequency
         el.replaceChildren();
-        for (const [t, c] of tags) {                    /// size + brightness by frequency
+        for (const [t, c] of tags) {                    /// size + colour by frequency: most -> white, yellow, orange <- least
             const f = max > min ? (c - min) / (max - min) : 1;
             const s = document.createElement('span');
             s.className = 't'; s.textContent = t; s.title = `${c} image${c === 1 ? '' : 's'}`;
             s.style.fontSize = (11 + f * 17).toFixed(1) + 'px';
-            s.style.opacity = (0.55 + 0.45 * f).toFixed(2);
+            s.style.color = f >= 0.5 ? `rgb(255,255,${Math.round(255*(2*f-1))})`   /// white .. yellow
+                                     : `rgb(255,${Math.round(165+180*f)},0)`;       /// yellow .. orange
             el.appendChild(s);
         }
         el.style.top = document.getElementById('panel').offsetHeight + 'px';
