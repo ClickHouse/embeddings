@@ -140,6 +140,18 @@ function axisAngle(ax, ay, az, th) {   /// Rodrigues rotation matrix about UNIT 
             [t*ax*az-s*ay, t*ay*az+s*ax, t*az*az+c]];
 }
 const rotParams = () => ({ r0: R[0][0], r1: R[0][1], r2: R[0][2], r3: R[1][0], r4: R[1][1], r5: R[1][2] });
+/// OKLCH -> sRGB (0..255), matching the server's colorOKLCHToSRGB — for the client-side rotation preview.
+function oklchToRGB(L, C, hDeg) {
+    const h = hDeg * Math.PI / 180, a = C * Math.cos(h), b = C * Math.sin(h);
+    const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+    const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+    const s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+    const l = l_*l_*l_, m = m_*m_*m_, s = s_*s_*s_;
+    const f = x => { x = x <= 0.0031308 ? 12.92*x : 1.055*Math.pow(x, 1/2.4) - 0.055; return Math.max(0, Math.min(1, x)) * 255; };
+    return [ f( 4.0767416621*l - 3.3077115913*m + 0.2309699292*s),
+             f(-1.2684380046*l + 2.6097574011*m - 0.3413193965*s),
+             f(-0.0041960863*l - 0.7034186147*m + 1.7076147010*s) ];
+}
 /// UMAP-3D per-dataset normalization: centre (cx,cy,cz), UNIFORM scale s (preserves 3D aspect while rotating),
 /// colour range (clo,chi) for hue, and projected-density q99 for brightness. siglip2 = PROVISIONAL (27.5M, loading).
 const U3D = {
@@ -852,6 +864,7 @@ if (+urlp.get('dims')) rep.dims = +urlp.get('dims');
 buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
     dataset = k;
     rep.dims = Math.min(rep.dims, repMaxDims());   /// keep the selected #dims if the new embedding supports it, else clamp to its max
+    if (is3D()) loadPreview(dataset);              /// warm the preview subset for the new dataset
     makeLayer();
     /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset
     if (curReport && document.getElementById('report').style.display !== 'none') showReport(curReport);
@@ -872,32 +885,111 @@ buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
 /// UMAP 3D: drag rotates the cloud, Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
 function set3DMode(on) {
     document.body.classList.toggle('proj3d', on);
-    if (on) map.dragging.disable();
+    if (on) { map.dragging.disable(); loadPreview(dataset); }   /// warm the preview subset so the first drag is instant
     else { map.dragging.enable(); document.body.classList.remove('rotating'); }
 }
+/// ---- UMAP-3D rotation preview ----
+/// A 100k-point subset is loaded once per dataset (RowBinary x,y,z,color -> normalized coords + precomputed hue
+/// colour). While the user drags, this subset is rendered on an overlay canvas with the IN-PROGRESS rotation
+/// matrix, in real time, so rotation feels instant; on release the server re-renders the full cloud (renderTile).
+const PREVIEW_N = 100000, PREVIEW_ALPHA = 0.45;   /// per-point additive weight: overlapping points -> brighter (density)
+const previewData = {};                           /// ds -> {n, nx,ny,nz:Float32, cr,cg,cb:Uint8} | 'loading' | null
+const pvCanvas = L.DomUtil.create('canvas', 'preview-canvas', map.getContainer());
+Object.assign(pvCanvas.style, { position: 'absolute', left: '0', top: '0', zIndex: 750, pointerEvents: 'none', display: 'none' });
+const pvCtx = pvCanvas.getContext('2d');
+let pvImg = null, pvU32 = null, pvT = null;       /// reused ImageData + its Uint32 view; data->container transform
+async function loadPreview(ds) {
+    if (previewData[ds]) return;                  /// already loaded or loading
+    previewData[ds] = 'loading';
+    try {
+        const u = U3D[ds];
+        const buf = await (await chQuery(`SELECT x, y, z, color FROM mmcommons.umap_${ds}_3d LIMIT ${PREVIEW_N} FORMAT RowBinary`, {})).arrayBuffer();
+        const dv = new DataView(buf), n = (buf.byteLength / 16) | 0;
+        const nx = new Float32Array(n), ny = new Float32Array(n), nz = new Float32Array(n);
+        const cr = new Uint8Array(n), cg = new Uint8Array(n), cb = new Uint8Array(n);
+        const crange = u.chi - u.clo;
+        for (let i = 0, o = 0; i < n; i++, o += 16) {
+            nx[i] = (dv.getFloat32(o, true)     - u.cx) / u.s;   /// same normalization as tileSQL3d
+            ny[i] = (dv.getFloat32(o + 4, true) - u.cy) / u.s;
+            nz[i] = (dv.getFloat32(o + 8, true) - u.cz) / u.s;
+            const hue = Math.max(0, Math.min(1, (dv.getFloat32(o + 12, true) - u.clo) / crange));
+            const rgb = oklchToRGB(0.75, 0.16, hue * 360);
+            cr[i] = rgb[0] * PREVIEW_ALPHA; cg[i] = rgb[1] * PREVIEW_ALPHA; cb[i] = rgb[2] * PREVIEW_ALPHA;
+        }
+        previewData[ds] = { n, nx, ny, nz, cr, cg, cb };
+    } catch (e) { previewData[ds] = null; }        /// on failure just skip the preview (release still re-renders)
+}
+/// data coords (0..2^32) -> container pixels is affine at a fixed map view; capture it once per drag.
+function previewTransform() {
+    const D = Math.pow(2, COORD_BITS);
+    const P0 = map.latLngToContainerPoint(dataToLatLng(0, 0));
+    const P1 = map.latLngToContainerPoint(dataToLatLng(D, D));
+    const ax = P1.x - P0.x, ay = P1.y - P0.y;      /// containerX = ax*(rx*PS+0.5)+P0.x = (ax*PS)*rx + (P0.x+ax/2)
+    return { SX: ax * U3D_PS, OX: P0.x + ax * 0.5, SY: ay * U3D_PS, OY: P0.y + ay * 0.5 };
+}
+function startPreview() {
+    const d = previewData[dataset];
+    if (!d || d === 'loading') { loadPreview(dataset); return; }   /// not ready -> no preview for this drag
+    const cont = map.getContainer(), W = cont.clientWidth, H = cont.clientHeight;
+    pvCanvas.width = W; pvCanvas.height = H;
+    pvImg = pvCtx.createImageData(W, H); pvU32 = new Uint32Array(pvImg.data.buffer);
+    pvT = previewTransform();
+    pvCanvas.style.display = 'block';
+    drawPreview(rStart.x, rStart.y);
+}
+/// render the subset with the rotation the drag WOULD commit right now (same arcball math as endRotate)
+function drawPreview(curX, curY) {
+    const d = previewData[dataset];
+    if (!d || d === 'loading' || pvCanvas.style.display === 'none') return;
+    const dx = curX - rStart.x, dy = curY - rStart.y, len = Math.hypot(dx, dy);
+    const Rp = len < 0.5 ? R : matMul(axisAngle(-dy / len, dx / len, 0, len * 0.006), R);
+    const r0 = Rp[0][0], r1 = Rp[0][1], r2 = Rp[0][2], r3 = Rp[1][0], r4 = Rp[1][1], r5 = Rp[1][2];
+    const W = pvImg.width, H = pvImg.height, data = pvImg.data;
+    pvU32.fill(0xFF000000);                                          /// opaque black background (hides the stale-orientation tiles)
+    const { SX, OX, SY, OY } = pvT, { n, nx, ny, nz, cr, cg, cb } = d;
+    for (let i = 0; i < n; i++) {
+        const X = nx[i], Y = ny[i], Z = nz[i];
+        const px = (SX * (r0 * X + r1 * Y + r2 * Z) + OX) | 0;
+        const py = (SY * (r3 * X + r4 * Y + r5 * Z) + OY) | 0;
+        if (px < 0 || py < 0 || px >= W || py >= H) continue;
+        const idx = (py * W + px) * 4;                               /// additive (clamped): denser -> brighter
+        data[idx] += cr[i]; data[idx + 1] += cg[i]; data[idx + 2] += cb[i];
+    }
+    pvCtx.putImageData(pvImg, 0, 0);
+}
+let pvRAF = null, pvPointer = null;
+function requestPreview(x, y) {   /// coalesce mousemove -> one draw per animation frame
+    pvPointer = { x, y };
+    if (!pvRAF) pvRAF = requestAnimationFrame(() => { pvRAF = null; if (rotating && pvPointer) drawPreview(pvPointer.x, pvPointer.y); });
+}
+function hidePreview() { if (pvRAF) { cancelAnimationFrame(pvRAF); pvRAF = null; } pvCanvas.style.display = 'none'; }
 /// Rotation is applied ONCE, on release (not during the drag). The drag start->end vector d and the view
 /// normal span the rotation plane; the rotation axis is the in-screen vector perpendicular to d, i.e. (-dy,dx,0)
 /// (so the visible projection plane itself is never rotated — points tilt into/out of depth along the drag).
 let rotating = false, rStart = null, panning = false, panStart = null;
-function endRotate(cx, cy, evForClick) {
+async function endRotate(cx, cy, evForClick) {
     rotating = false; document.body.classList.remove('rotating');
     const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
-    if (len < 5) { if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
+    if (len < 5) { hidePreview(); if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
     R = matMul(axisAngle(-dy / len, dx / len, 0, len * 0.006), R);  /// pre-multiply: rotate in view space
-    redraw(); updateURL();
+    drawPreview(cx, cy);                                            /// hold the final orientation on-screen...
+    const done = redraw(); updateURL();
+    try { await done; } catch (e) {}
+    if (!rotating) hidePreview();                                   /// ...until the server tiles catch up (unless a new drag started)
 }
 map.getContainer().addEventListener('mousedown', (e) => {
     if (!is3D() || e.button !== 0) return;
     if (e.ctrlKey || e.metaKey) {                                   /// Ctrl/Cmd+drag pans the map (live) instead of rotating
         panning = true; panStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
     } else {
-        rotating = true; rStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
+        rotating = true; rStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating'); startPreview();
     }
 });
-addEventListener('mousemove', (e) => {   /// live pan (Leaflet drag is off in 3D so we drive panBy ourselves)
-    if (!panning) return;
-    map.panBy([panStart.x - e.clientX, panStart.y - e.clientY], { animate: false });
-    panStart = { x: e.clientX, y: e.clientY };
+addEventListener('mousemove', (e) => {
+    if (panning) {   /// live pan (Leaflet drag is off in 3D so we drive panBy ourselves)
+        map.panBy([panStart.x - e.clientX, panStart.y - e.clientY], { animate: false });
+        panStart = { x: e.clientX, y: e.clientY };
+    } else if (rotating) requestPreview(e.clientX, e.clientY);   /// live rotation preview
 });
 addEventListener('mouseup', (e) => {
     if (panning) { panning = false; document.body.classList.remove('rotating'); updateURL(); }
@@ -905,7 +997,10 @@ addEventListener('mouseup', (e) => {
 });
 map.getContainer().addEventListener('touchstart', (e) => {
     if (!is3D() || e.touches.length !== 1) return;
-    rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; document.body.classList.add('rotating');
+    rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; document.body.classList.add('rotating'); startPreview();
+}, { passive: true });
+map.getContainer().addEventListener('touchmove', (e) => {
+    if (rotating && e.touches.length === 1) requestPreview(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
 addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, t); } });
 /// click in 3D: nearest point in the current rotated projection (full scan) -> report
