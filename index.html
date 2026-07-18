@@ -178,8 +178,8 @@ let md5ToTagSpans = new Map();   /// md5 -> [its tag <span>s], for thumbnail-hov
 let repLoading = false; /// a scan is in flight (guards scroll-triggered load-more)
 let repMore = true;     /// more results may exist (the last batch was full)
 const MAX_RESULTS = 3000;   /// safety cap on rendered thumbnails
-/// report similarity config — default: Int8, rotated, 1 bit, 128 dims (fast, coarse first pass)
-let rep = { type: 'Int8', rot: 'rotated', bits: 1, dims: 128 };
+/// report similarity config — default: Int8, rotated, 2 bits, 384 dims (fast, coarse first pass)
+let rep = { type: 'Int8', rot: 'rotated', bits: 2, dims: 384 };
 /// Map projection: linear uses the emb_<ds> table (x,y,z); UMAP uses umap_<ds>_2d (mx,my,mz).
 /// The similarity SEARCH always runs on the emb table (umap tables have no embeddings).
 function projCfg() {
