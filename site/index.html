@@ -42,7 +42,7 @@
         padding: .5em .6em .4em; box-shadow: 0 3px 10px rgba(0,0,0,.55); }
     #report h3 { margin: .2em 0 .4em; color: #ff0; }
     #report .close { float: right; cursor: pointer; color: #f66; font-size: 18px; }
-    #report .qcmp { float: right; margin: .35em .8em 0 0; font-size: 12px; }
+    #report .qcmp { font-weight: normal; }   /* inline in the title (h3-sized) after "Top-N similar |" */
     #grid { display: grid; grid-template-columns: repeat(auto-fill, 75px); gap: 3px; padding: .5em .6em .6em; }
     #grid img { width: 75px; height: 75px; image-rendering: pixelated; cursor: pointer;
         border: 1px solid #333; background: #222; transition: filter .15s; }
@@ -452,8 +452,7 @@ function buildReportShell() {
     document.getElementById('report-body').innerHTML =
         `<div id="rep-head">
            <span class="close" onclick="hideReport()">✕</span>
-           <a class="qcmp" href="recall.html">Quality comparison &#8599;</a>
-           <h3 id="rc-title">Top-100 similar</h3>
+           <h3 id="rc-title"><span id="rc-count">Top-100 similar</span> | <a class="qcmp" href="recall.html">Quality comparison &#8599;</a></h3>
            <div>query: <span id="rc-query"></span></div>
            <div class="repctl">
              <div><label>type</label><span id="rc-type"></span></div>
@@ -495,7 +494,9 @@ async function updateTagCloud() {
     const sql = `SELECT tag, count() c FROM (SELECT arrayJoin(user_tags) tag
         FROM mmcommons.tags_by_md5 WHERE md5 IN (${inlist})) GROUP BY tag ORDER BY c DESC, tag LIMIT 60 FORMAT JSONCompactEachRow`;
     try {
-        const resp = await fetch(chURL('enable_parallel_replicas=0'), { method: 'POST', body: sql });  /// PK seek on md5 -> no PR
+        /// PK seek on md5 -> no PR; use the query cache, allowing arrayJoin (row-generating -> non-deterministic, else Code 704)
+        const resp = await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1&query_cache_nondeterministic_function_handling=save'),
+            { method: 'POST', body: sql });
         if (!resp.ok) throw new Error(await resp.text());
         const txt = await resp.text();
         if (seq !== tagSeq || !reportActive) return;    /// a newer results set superseded this
@@ -593,7 +594,7 @@ async function runSimilar(more) {
         updateTagCloud();                                                  /// refresh the user-tag cloud over the map
         repMore = rows.length === cnt && repLoaded < MAX_RESULTS;          /// full batch -> more may exist
         hideError();
-        document.getElementById('rc-title').textContent = `Top-${repLoaded} similar`;
+        document.getElementById('rc-count').textContent = `Top-${repLoaded} similar`;
         const secs = (+(prog && prog.elapsed_ns) || 0) / 1e9, rr = +(prog && prog.read_rows) || 0, rb = +(prog && prog.read_bytes) || 0;
         stats.innerHTML = `${repLoaded} shown · <b>${secs.toFixed(2)} s</b> · ${fmtNum(secs ? rr / secs : 0)} rows/s · ` +
             `${fmtBytes(secs ? rb / secs : 0)}/s · scanned ${fmtNum(rr)} rows`;
