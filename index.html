@@ -88,6 +88,7 @@
     <b>Embeddings Explorer</b>
     <div class="grp"><label>dataset</label><span id="datasets"></span></div>
     <div class="grp"><label>mode</label><span id="modes"></span></div>
+    <div class="grp"><label>projection</label><span id="projs"></span></div>
     <span id="status">ready</span>
 </div>
 <div id="tagcloud"></div>
@@ -109,9 +110,9 @@ const COORD_BITS = 32;             /// x,y live in [0, 2^32)
 /// dim = original embedding dim; rdim = rotated QBit dim (randomHadamardTransform pads 1152->2048
 /// but leaves 768->768). q99 = z=0 per-pixel density for brightness (still siglip2's for clip/nomic).
 const DATASETS = {
-    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152, rdim: 2048, q99: 378 },
-    clip:    { table: 'mmcommons.emb_clip',    dim: 768,  rdim: 768,  q99: 378 },
-    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  rdim: 768,  q99: 378 },
+    siglip2: { table: 'mmcommons.emb_siglip2', dim: 1152, rdim: 2048, q99: 378, uq99: 662 },
+    clip:    { table: 'mmcommons.emb_clip',    dim: 768,  rdim: 768,  q99: 378, uq99: 1552 },
+    nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  rdim: 768,  q99: 378, uq99: 1206 },
 };
 /// The 4 QBit representation columns (type x rotation). Report similarity uses ONLY these via
 /// cosineDistanceTransposed(qbit, ref[dims], bits, dims). The QBit dim is dataset-aware (see qbitInfo).
@@ -123,6 +124,7 @@ const QBIT = {
 };
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
+let proj = 'linear';      /// 'linear' | 'UMAP' — map projection (UMAP uses the umap_<ds>_2d tables)
 let curReport = null;                                       /// md5 of the open report
 let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
 let repAbort = null;                                        /// aborts a still-running scan when switching
@@ -136,7 +138,15 @@ let repMore = true;     /// more results may exist (the last batch was full)
 const MAX_RESULTS = 3000;   /// safety cap on rendered thumbnails
 /// report similarity config — default: Int8, rotated, 1 bit, 128 dims (fast, coarse first pass)
 let rep = { type: 'Int8', rot: 'rotated', bits: 1, dims: 128 };
-const curTable = () => DATASETS[dataset].table;
+/// Map projection: linear uses the emb_<ds> table (x,y,z); UMAP uses umap_<ds>_2d (mx,my,mz).
+/// The similarity SEARCH always runs on the emb table (umap tables have no embeddings).
+function projCfg() {
+    return proj === 'UMAP'
+        ? { table: `mmcommons.umap_${dataset}_2d`, xc: 'mx', yc: 'my', zc: 'mz',
+            q99: DATASETS[dataset].uq99 || DATASETS[dataset].q99 }
+        : { table: DATASETS[dataset].table, xc: 'x', yc: 'y', zc: 'z', q99: DATASETS[dataset].q99 };
+}
+const curTable = () => projCfg().table;
 /// QBit dim is dataset-aware: rotated cols use the dataset's rotated dim (rdim), others its original dim.
 const qbitInfo = () => { const q = QBIT[`${rep.type}|${rep.rot}`], d = DATASETS[dataset]; return { col: q.col, dim: q.rot ? d.rdim : d.dim }; };
 const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
@@ -174,6 +184,7 @@ function tileSQL(table, q99) {
     /// Fixed brightness normalization: expected q99 per-pixel density / 4^zoom (each 2x zoom
     /// quarters the per-pixel area). q is a constant per tile -> brightness is consistent across
     /// tiles and zoom levels (adsb-style), instead of a per-tile quantile.
+    const { xc, yc, zc } = projCfg();   /// data columns: x,y,z (linear) or mx,my,mz (UMAP). {x:}/{y:} below are tile coords.
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
         ${q99} / pow(4, {z:UInt8}) AS q
@@ -182,26 +193,26 @@ function tileSQL(table, q99) {
     FROM (
         SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
         FROM (
-            SELECT toUInt16(intDiv((x - tx0) * ${TILE}, ts)) AS px,
-                   toUInt16(intDiv((y - ty0) * ${TILE}, ts)) AS py,
-                   count() AS cnt, avg(z) / 65535 AS hue
+            SELECT toUInt16(intDiv((${xc} - tx0) * ${TILE}, ts)) AS px,
+                   toUInt16(intDiv((${yc} - ty0) * ${TILE}, ts)) AS py,
+                   count() AS cnt, avg(${zc}) / 65535 AS hue
             FROM ${table}
-            WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
+            WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
             GROUP BY px, py
         )
     ) FORMAT RowBinary`;
 }
 /// One representative md5 per 75px cell for the thumbnails overlay.
 function thumbCellsSQL(table) {
-    const CELL = 75;
+    const CELL = 75; const { xc, yc } = projCfg();
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
         intDiv(ts * ${CELL}, ${TILE}) AS cell
     SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
     FROM (
-        SELECT intDiv(x - tx0, cell) AS cx, intDiv(y - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
+        SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
         FROM ${table}
-        WHERE x >= tx0 AND x < tx0 + ts AND y >= ty0 AND y < ty0 + ts
+        WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
     )
     GROUP BY cx, cy
     FORMAT RowBinary`;
@@ -209,7 +220,7 @@ function thumbCellsSQL(table) {
 
 /// ---- Rendering ----
 async function renderTile(coords, canvas) {
-    const table = curTable(), q99 = DATASETS[dataset].q99;
+    const table = curTable(), q99 = projCfg().q99;
     const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
     try {
@@ -304,9 +315,26 @@ function overlayIcon(md5, size) {
         html: `<img src="${thumbURL(md5)}" data-md5="${md5}" draggable="false" class="loading" onload="this.classList.remove('loading')" style="width:${size}px;height:${size}px">`,
         iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
+let lastRows = [];   /// last result rows [{md5,x,y}] (emb coords) — for re-placing the overlay on projection switch
 function clearOverlay() { topkLayer.clearLayers(); overlayPts = []; }
-function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail markers centered on each point
-    for (const r of rows) {
+/// batch-lookup UMAP map coords (mx,my) for result md5s (PK seek on umap_<ds>_2d)
+async function umapCoords(md5s) {
+    const m = new Map();
+    if (!md5s.length) return m;
+    const sql = `SELECT md5, mx, my FROM mmcommons.umap_${dataset}_2d WHERE md5 IN (${md5s.map(x => `'${x}'`).join(',')}) FORMAT JSONCompactEachRow`;
+    try {
+        const txt = await (await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1'), { method: 'POST', body: sql })).text();
+        for (const l of txt.trim().split('\n')) if (l) { const [md5, mx, my] = JSON.parse(l); m.set(md5, { md5, x: mx, y: my }); }
+    } catch (e) {}
+    return m;
+}
+async function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail markers at their map points
+    let pts = rows;
+    if (proj === 'UMAP') {                 /// reposition to UMAP coords; drop results not present in the umap table (e.g. siglip2 subset)
+        const cm = await umapCoords(rows.map(r => r.md5));
+        pts = rows.map(r => cm.get(r.md5)).filter(Boolean);
+    }
+    for (const r of pts) {
         const ll = dataToLatLng(+r.x, +r.y);
         const marker = L.marker(ll, { icon: overlayIcon(r.md5, MAX_THUMB), keyboard: false, riseOnHover: true })
             .on('click', () => showReport(r.md5))
@@ -352,7 +380,7 @@ function latlngToData(latlng) {
 map.on('click', async (e) => {
     /// point-cloud: if the hover thumbnail is showing, target exactly that image (what the user sees)
     if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }
-    const table = curTable();
+    const { table, xc, yc } = projCfg();
     const d = latlngToData(e.latlng);
     setStatus('finding point…');
     try {
@@ -368,16 +396,16 @@ map.on('click', async (e) => {
             const y0 = ty0 + Math.floor((d.y - ty0) / cell) * cell;
             const x1 = Math.min(x0 + cell, tx0 + ts), y1 = Math.min(y0 + cell, ty0 + ts);
             sql = `SELECT argMin(md5, cityHash64(md5)) FROM ${table}
-                WHERE x >= {x0:UInt64} AND x < {x1:UInt64} AND y >= {y0:UInt64} AND y < {y1:UInt64} FORMAT TSV`;
+                WHERE ${xc} >= {x0:UInt64} AND ${xc} < {x1:UInt64} AND ${yc} >= {y0:UInt64} AND ${yc} < {y1:UInt64} FORMAT TSV`;
             params = { x0, y0, x1, y1 };
         } else {
             /// Point cloud: nearest visible point to the click.
             const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
             const r = Math.max(1, Math.round(px * 6));
             sql = `SELECT md5 FROM ${table}
-                WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
-                  AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
-                ORDER BY pow(toInt64(x) - toInt64({cx:UInt32}), 2) + pow(toInt64(y) - toInt64({cy:UInt32}), 2) ASC
+                WHERE ${xc} BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
+                  AND ${yc} BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
+                ORDER BY pow(toInt64(${xc}) - toInt64({cx:UInt32}), 2) + pow(toInt64(${yc}) - toInt64({cy:UInt32}), 2) ASC
                 LIMIT 1 FORMAT TSV`;
             params = { cx: d.x, cy: d.y, r };
         }
@@ -401,10 +429,11 @@ async function hoverPreview(latlng, cp) {
     const seq = ++hoverSeq, d = latlngToData(latlng);
     const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE, r = Math.max(1, Math.round(px * 6));
     /// nearest point via the morton projection; routed to website_thumbs (point-query user) not to compete with reports
-    const sql = `SELECT md5 FROM ${curTable()}
-        WHERE x BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
-          AND y BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
-        ORDER BY pow(toInt64(x) - toInt64({cx:UInt32}), 2) + pow(toInt64(y) - toInt64({cy:UInt32}), 2) ASC LIMIT 1 FORMAT TSV`;
+    const { table: pt, xc, yc } = projCfg();
+    const sql = `SELECT md5 FROM ${pt}
+        WHERE ${xc} BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
+          AND ${yc} BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
+        ORDER BY pow(toInt64(${xc}) - toInt64({cx:UInt32}), 2) + pow(toInt64(${yc}) - toInt64({cy:UInt32}), 2) ASC LIMIT 1 FORMAT TSV`;
     try {
         const url = chURL(`default_format=TSV&param_cx=${d.x}&param_cy=${d.y}&param_r=${r}`, USER_THUMBS);
         const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
@@ -561,7 +590,7 @@ function clearTagHl() {
 }
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
 async function runSimilar(more) {
-    const table = curTable(), col = qbitInfo().col, md5 = curReport;
+    const table = DATASETS[dataset].table, col = qbitInfo().col, md5 = curReport;   /// SEARCH always on emb (umap has no embeddings)
     /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
     const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
     const grid = document.getElementById('grid'), stats = document.getElementById('rep-stats');
@@ -624,7 +653,7 @@ async function runSimilar(more) {
             for (const r of rows) grid.appendChild(thumbImg(r.md5, false));   /// append the next page (keeps scroll position)
             addOverlayThumbs(rows);                                           /// and place them on the map
             repLoaded += rows.length;
-            for (const r of rows) repMd5s.push(r.md5);
+            for (const r of rows) { repMd5s.push(r.md5); lastRows.push(r); }
         } else {
             const next = [thumbImg(md5, true)];                            /// rebuild: query thumb + results
             for (const r of rows) next.push(thumbImg(r.md5, false));
@@ -632,7 +661,7 @@ async function runSimilar(more) {
             grid.classList.remove('loading');
             clearOverlay(); addOverlayThumbs(rows);                        /// refresh the on-map overlay
             repLoaded = rows.length;
-            repMd5s = rows.map(r => r.md5);
+            repMd5s = rows.map(r => r.md5); lastRows = rows.slice();
         }
         updateTagCloud();                                                  /// refresh the user-tag cloud over the map
         repMore = rows.length === cnt && repLoaded < MAX_RESULTS;          /// full batch -> more may exist
@@ -725,6 +754,7 @@ function buildSwitch(elemId, keys, current, onPick) {
 const urlp = new URLSearchParams(location.hash.slice(1));
 if (DATASETS[urlp.get('ds')]) dataset = urlp.get('ds');
 if (urlp.get('mode') === 'points' || urlp.get('mode') === 'thumbs') mode = urlp.get('mode');
+if (urlp.get('proj') === 'linear' || urlp.get('proj') === 'UMAP') proj = urlp.get('proj');
 if (urlp.get('type')) rep.type = urlp.get('type');
 if (urlp.get('rot')) rep.rot = urlp.get('rot');
 if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
@@ -742,6 +772,12 @@ buildSwitch('modes', ['points', 'thumbs'], mode, k => {
     mode = k;
     if (k === 'thumbs' && reportActive) hideReport();   /// thumbs mode has no top-K panel — close it on switch
     hideHover(); redraw(); updateURL();
+});
+buildSwitch('projs', ['linear', 'UMAP'], proj, k => {
+    proj = k;
+    hideHover(); redraw();                               /// re-render tiles for the new projection (linear x,y,z vs umap mx,my,mz)
+    if (reportActive) { clearOverlay(); addOverlayThumbs(lastRows); }   /// re-place the result overlay at the new projection
+    updateURL();
 });
 
 /// offset the Leaflet top controls below the (variable-height, wrappable) header bar
@@ -763,7 +799,7 @@ if (urlp.has('z') && urlp.has('x') && urlp.has('y'))
 function updateURL() {
     const c = latlngToData(map.getCenter());
     const p = new URLSearchParams();
-    p.set('ds', dataset); p.set('mode', mode);
+    p.set('ds', dataset); p.set('mode', mode); p.set('proj', proj);
     p.set('z', Math.round(map.getZoom())); p.set('x', c.x); p.set('y', c.y);
     if (reportActive && curReport) {
         p.set('md5', curReport); p.set('type', rep.type); p.set('rot', rep.rot);
