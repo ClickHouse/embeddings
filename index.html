@@ -37,6 +37,8 @@
     .opt { padding: .2em .5em; background: #333; border: 1px solid #000; cursor: pointer; user-select: none; }
     .opt:hover { background: #ff0; color: #000; }
     .opt.sel { background: #fff; color: #000; }
+    #hint3d { display: none; color: #999; }                          /* only in UMAP 3D (body.proj3d) */
+    body.proj3d #hint3d { display: inline; }
     #status { margin-left: auto; color: #8bc34a; font-family: monospace; }
     #report { position: absolute; top: 0; right: 0; bottom: 0; width: 40%; max-width: 640px;
         z-index: 1002; background: rgba(15,15,15,.97); overflow-y: auto; display: none;
@@ -91,6 +93,7 @@
     <div class="grp"><label>dataset</label><span id="datasets"></span></div>
     <div class="grp"><label>mode</label><span id="modes"></span></div>
     <div class="grp"><label>projection</label><span id="projs"></span></div>
+    <span id="hint3d">drag to rotate, Ctrl/Cmd+drag to pan</span>
     <span id="status">ready</span>
 </div>
 <div id="tagcloud"></div>
@@ -277,6 +280,14 @@ function tileSQL3d(table, q99) {
         )
     ) FORMAT RowBinary`;
 }
+/// Render the point cloud into a Display-P3 canvas where supported: the server's sRGB-valued colours are
+/// placed as P3 coordinates, so on wide-gamut/HDR displays the cloud shows more vivid colour. Falls back to
+/// sRGB if the browser lacks canvas colour-space support. (Photos in the thumbnail layer stay sRGB.)
+const CANVAS_CS = (() => {
+    try { const c = document.createElement('canvas').getContext('2d', { colorSpace: 'display-p3' });
+          return c && c.getContextAttributes && c.getContextAttributes().colorSpace === 'display-p3' ? 'display-p3' : 'srgb'; }
+    catch (e) { return 'srgb'; }
+})();
 /// The point cloud is a persistent base layer shown in BOTH modes; switching points<->thumbs
 /// never re-renders (or re-queries) it — see applyMode. Projection / 3D-rotation changes DO
 /// re-render it (the tile coordinates genuinely change) via redraw(). Thumbs mode dims it via
@@ -284,7 +295,7 @@ function tileSQL3d(table, q99) {
 async function renderTile(coords, canvas) {
     const cfg = projCfg(), table = cfg.table, q99 = cfg.q99;
     const p = { z: coords.z, x: coords.x, y: coords.y };
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { colorSpace: CANVAS_CS });
     const seq = canvas._rseq = (canvas._rseq || 0) + 1;   /// discard a stale render if a newer one for this tile started
     try {
         let sql;
@@ -293,7 +304,7 @@ async function renderTile(coords, canvas) {
         const buf = await (await chQuery(sql, p)).arrayBuffer();
         if (canvas._rseq !== seq) return;                 /// superseded -> keep the current image (no blank / no stale overwrite)
         const dv = new DataView(buf);
-        const img = ctx.createImageData(TILE, TILE);
+        const img = ctx.createImageData(TILE, TILE, { colorSpace: CANVAS_CS });
         for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
             const px = dv.getUint16(o, true), py = dv.getUint16(o + 2, true);
             const i = (py * TILE + px) * 4;
@@ -928,7 +939,7 @@ const PREVIEW_N = 100000, PREVIEW_ALPHA = 0.45;   /// per-point additive weight:
 const previewData = {};                           /// ds -> {n, nx,ny,nz:Float32, cr,cg,cb:Uint8} | 'loading' | null
 const pvCanvas = L.DomUtil.create('canvas', 'preview-canvas', map.getContainer());
 Object.assign(pvCanvas.style, { position: 'absolute', left: '0', top: '0', zIndex: 750, pointerEvents: 'none', display: 'none' });
-const pvCtx = pvCanvas.getContext('2d');
+const pvCtx = pvCanvas.getContext('2d', { colorSpace: CANVAS_CS });   /// match the point-cloud tiles' gamut (Display-P3)
 let pvImg = null, pvU32 = null, pvT = null;       /// reused ImageData + its Uint32 view; data->container transform
 async function loadPreview(ds) {
     if (previewData[ds]) return;                  /// already loaded or loading
@@ -964,7 +975,7 @@ function startPreview() {
     if (!d || d === 'loading') { loadPreview(dataset); return; }   /// not ready -> no preview for this drag
     const cont = map.getContainer(), W = cont.clientWidth, H = cont.clientHeight;
     pvCanvas.width = W; pvCanvas.height = H;
-    pvImg = pvCtx.createImageData(W, H); pvU32 = new Uint32Array(pvImg.data.buffer);
+    pvImg = pvCtx.createImageData(W, H, { colorSpace: CANVAS_CS }); pvU32 = new Uint32Array(pvImg.data.buffer);
     pvT = previewTransform();
     pvCanvas.style.display = 'block';
     drawPreview(rStart.x, rStart.y);
