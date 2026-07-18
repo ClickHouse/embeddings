@@ -73,10 +73,9 @@
     .leaflet-control-attribution a { color: #ff0 !important; }
     /* user-tag cloud for the current top-K results, pinned under the top panel over the map */
     #tagcloud { position: absolute; left: 0; right: 0; z-index: 900; display: none;
-        background: rgba(15,15,15,.85); border-bottom: 1px solid #333; padding: .35em .6em .35em 52px;
-        max-height: 24vh; overflow-y: auto; line-height: 1.9; }   /* left pad clears the zoom control */
-    body.report-open #tagcloud { right: min(40%, 640px); }
-    #tagcloud .t { display: inline-block; margin: 0 .3em; white-space: nowrap; color: #9ccc65; }
+        background: rgba(15,15,15,.85); padding: .3em .6em; text-align: center;
+        max-height: 24vh; overflow-y: auto; line-height: 1.25; }
+    #tagcloud .t { display: inline-block; margin: 0 .3em; white-space: nowrap; color: #fff; }
 </style>
 </head>
 <body>
@@ -500,9 +499,11 @@ async function updateTagCloud() {
         if (!resp.ok) throw new Error(await resp.text());
         const txt = await resp.text();
         if (seq !== tagSeq || !reportActive) return;    /// a newer results set superseded this
-        const tags = txt.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));   /// [tag, count]
+        const tags = txt.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));   /// [tag, count], by count desc
         if (!tags.length) { el.style.display = 'none'; return; }
-        const max = tags[0][1], min = tags[tags.length - 1][1];
+        const cnts = tags.map(t => t[1]);
+        const max = Math.max(...cnts), min = Math.min(...cnts);
+        tags.sort((a, b) => a[0].localeCompare(b[0]));   /// display alphabetically; font size still by frequency
         el.replaceChildren();
         for (const [t, c] of tags) {                    /// size + brightness by frequency
             const f = max > min ? (c - min) / (max - min) : 1;
