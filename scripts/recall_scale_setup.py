@@ -26,10 +26,27 @@ def q(sql, settings=''):
     if r.status!=200: raise Exception(f"HTTP {r.status}: {d[:400]}\n--SQL: {sql[:160]}")
     return d.strip()
 
+PR = '&enable_parallel_replicas=1&max_parallel_replicas=3'
+
 def setup(ds):
     rot,strd,intc,rintc = SPECS[ds]
     st=f"bench.samp_{ds}_{LABEL}"; gt=f"bench.gt_{ds}_{LABEL}"
     t0=time.time()
+    if LABEL == 'full':
+        # no sample copy — ground truth is exact-cosine top-100 straight over the whole main table
+        src=f"mmcommons.{ds}"
+        q(f"DROP TABLE IF EXISTS {gt}")
+        q(f"CREATE TABLE {gt} (q_idx UInt32, gt10 Array(String), gt100 Array(String)) ENGINE=MergeTree ORDER BY q_idx")
+        q(f"""INSERT INTO {gt}
+              SELECT q_idx, arraySlice(gt,1,10), gt FROM (
+                SELECT q_idx, arrayMap(t->t.2, groupArraySorted(100)(tuple(dist,md5))) gt FROM (
+                  SELECT q.q_idx q_idx, s.md5 md5, cosineDistance(CAST(s.embedding,'Array(Float32)'), q.ref_orig) dist
+                  FROM {src} s CROSS JOIN bench.q_{ds} q WHERE s.md5 != q.q_md5
+                ) GROUP BY q_idx)""",
+          settings=PR+'&max_memory_usage=64000000000&max_execution_time=3600')
+        n=q(f"SELECT count() FROM {src}"); g=q(f"SELECT count() FROM {gt}")
+        print(f"{ds}: FULL src={n} rows, gt={g} queries, {time.time()-t0:.0f}s", flush=True)
+        return
     cut=q(f"SELECT md5 FROM mmcommons.{ds} ORDER BY md5 LIMIT 1 OFFSET {N}")
     q(f"DROP TABLE IF EXISTS {st}"); q(f"DROP TABLE IF EXISTS {gt}")
     q(f"""CREATE TABLE {st} (md5 String, embedding Array(BFloat16),
