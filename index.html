@@ -400,7 +400,7 @@ function redraw() {
 /// ---- top-K overlay: result thumbnails placed on the map at their (x,y) points ----
 let reportActive = false;
 const topkLayer = L.layerGroup();
-let overlayPts = [];                                         /// [{md5, ll, marker, size}]
+let overlayPts = [];                                         /// [{md5, ll, marker, size, e3d}]  (e3d: raw UMAP-3D x,y,z or null)
 const MAX_THUMB = 75, MIN_THUMB = 12;
 /// inverse of latlngToData: data coords (0..2^32) -> CRS.Simple latlng
 function dataToLatLng(x, y) { const s = Math.pow(2, COORD_BITS) / TILE; return map.unproject([x / s, y / s], 0); }
@@ -423,21 +423,53 @@ async function umapCoords(md5s) {
     } catch (e) {}
     return m;
 }
+/// batch-lookup raw UMAP-3D coords (x,y,z) for result md5s (PK seek on umap_<ds>_3d) — for the 3D overlay
+async function umap3dCoords(md5s) {
+    const m = new Map();
+    if (!md5s.length) return m;
+    const sql = `SELECT md5, x, y, z FROM mmcommons.umap_${dataset}_3d WHERE md5 IN (${md5s.map(x => `'${x}'`).join(',')}) FORMAT JSONCompactEachRow`;
+    try {
+        const txt = await (await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1'), { method: 'POST', body: sql })).text();
+        for (const l of txt.trim().split('\n')) if (l) { const [md5, x, y, z] = JSON.parse(l); m.set(md5, { md5, x, y, z }); }
+    } catch (e) {}
+    return m;
+}
+/// project raw UMAP-3D coords through the current rotation R into data coords (0..2^32) — same math as tileSQL3d
+function project3dData(x, y, z) {
+    const u = U3D[dataset];
+    const nx = (x - u.cx) / u.s, ny = (y - u.cy) / u.s, nz = (z - u.cz) / u.s;
+    const rx = R[0][0]*nx + R[0][1]*ny + R[0][2]*nz, ry = R[1][0]*nx + R[1][1]*ny + R[1][2]*nz;
+    return { x: (rx * U3D_PS + 0.5) * 4294967295, y: (ry * U3D_PS + 0.5) * 4294967295 };
+}
 async function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail markers at their map points
-    if (is3D()) return;                    /// 3D overlay not placed yet (would need per-frame client-side re-projection)
     let pts = rows;
-    if (proj === 'UMAP') {                 /// reposition to UMAP coords; drop results not present in the umap table (e.g. siglip2 subset)
+    if (is3D()) {                          /// 3D: fetch raw (x,y,z) and project through the current rotation
+        const cm = await umap3dCoords(rows.map(r => r.md5));
+        pts = rows.map(r => cm.get(r.md5)).filter(Boolean);
+    } else if (proj === 'UMAP') {          /// reposition to UMAP coords; drop results not present in the umap table (e.g. siglip2 subset)
         const cm = await umapCoords(rows.map(r => r.md5));
         pts = rows.map(r => cm.get(r.md5)).filter(Boolean);
     }
     for (const r of pts) {
-        const ll = dataToLatLng(+r.x, +r.y);
+        const e3d = is3D() ? { x: +r.x, y: +r.y, z: +r.z } : null;   /// keep raw 3D coords to re-project on rotation
+        const dc = e3d ? project3dData(e3d.x, e3d.y, e3d.z) : { x: +r.x, y: +r.y };
+        const ll = dataToLatLng(dc.x, dc.y);
         const marker = L.marker(ll, { icon: overlayIcon(r.md5, MAX_THUMB), keyboard: false, riseOnHover: true })
             .on('click', () => showReport(r.md5))
-            .on('mouseover', () => { previewImg(r.md5); highlightTags(r.md5); })
+            .on('mouseover', () => { if (rotating) return; previewImg(r.md5); highlightTags(r.md5); })   /// no hover preview mid-rotation
             .on('mouseout', () => { hidePreview(); clearTagHl(); })
             .addTo(topkLayer);
-        overlayPts.push({ md5: r.md5, ll, marker, size: MAX_THUMB });
+        overlayPts.push({ md5: r.md5, ll, marker, size: MAX_THUMB, e3d });
+    }
+    sizeOverlay();
+}
+/// re-place the top-K thumbnails after the rotation changes (their (x,y,z) are fixed; only the projection moves)
+function reprojectOverlay3D() {
+    if (!is3D()) return;
+    for (const p of overlayPts) {
+        if (!p.e3d) continue;
+        const dc = project3dData(p.e3d.x, p.e3d.y, p.e3d.z);
+        p.ll = dataToLatLng(dc.x, dc.y); p.marker.setLatLng(p.ll);
     }
     sizeOverlay();
 }
@@ -879,7 +911,7 @@ buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
     proj = k;
     set3DMode(is3D());
     hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
-    if (reportActive) { clearOverlay(); if (!is3D()) addOverlayThumbs(lastRows); }   /// (overlay not placed in 3D)
+    if (reportActive) { clearOverlay(); addOverlayThumbs(lastRows); }   /// re-place the top-K overlay for the new projection (incl. 3D)
     updateURL();
 });
 /// UMAP 3D: drag rotates the cloud, Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
@@ -962,7 +994,7 @@ function requestPreview(x, y) {   /// coalesce mousemove -> one draw per animati
     pvPointer = { x, y };
     if (!pvRAF) pvRAF = requestAnimationFrame(() => { pvRAF = null; if (rotating && pvPointer) drawPreview(pvPointer.x, pvPointer.y); });
 }
-function hidePreview() { if (pvRAF) { cancelAnimationFrame(pvRAF); pvRAF = null; } pvCanvas.style.display = 'none'; }
+function hideRotPreview() { if (pvRAF) { cancelAnimationFrame(pvRAF); pvRAF = null; } pvCanvas.style.display = 'none'; }
 /// Rotation is applied ONCE, on release (not during the drag). The drag start->end vector d and the view
 /// normal span the rotation plane; the rotation axis is the in-screen vector perpendicular to d, i.e. (-dy,dx,0)
 /// (so the visible projection plane itself is never rotated — points tilt into/out of depth along the drag).
@@ -970,19 +1002,22 @@ let rotating = false, rStart = null, panning = false, panStart = null;
 async function endRotate(cx, cy, evForClick) {
     rotating = false; document.body.classList.remove('rotating');
     const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
-    if (len < 5) { hidePreview(); if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
+    if (len < 5) { hideRotPreview(); if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
     R = matMul(axisAngle(-dy / len, dx / len, 0, len * 0.006), R);  /// pre-multiply: rotate in view space
+    if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
     const done = redraw(); updateURL();                            /// NOT drawPreview(cx,cy), which would re-apply the drag)
     try { await done; } catch (e) {}
-    if (!rotating) hidePreview();                                   /// ...until the server tiles catch up (unless a new drag started)
+    if (!rotating) hideRotPreview();                                /// ...until the server tiles catch up (unless a new drag started)
 }
 map.getContainer().addEventListener('mousedown', (e) => {
     if (!is3D() || e.button !== 0) return;
     if (e.ctrlKey || e.metaKey) {                                   /// Ctrl/Cmd+drag pans the map (live) instead of rotating
         panning = true; panStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
     } else {
-        rotating = true; rStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating'); startPreview();
+        rotating = true; rStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
+        hidePreview(); clearTagHl();   /// clear any hover full-image/tag highlight before it gets stuck behind the preview
+        startPreview();
     }
 });
 addEventListener('mousemove', (e) => {
