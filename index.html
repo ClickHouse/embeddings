@@ -32,6 +32,7 @@
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
         padding: .4em .6em; background: rgba(20,20,20,.88); font-size: 13px; }
+    body.report-open #panel { right: min(40%, 640px); }   /* keep status/zoom clear of the top-K panel (exact width set in JS) */
     #panel b { color: #ff0; }
     .grp { display: flex; gap: .15em; align-items: center; }
     .grp label { color: #999; margin-right: .25em; }
@@ -962,7 +963,11 @@ function hideReport() {
 /// Toggle the map-shrink layout and tell Leaflet to re-measure its container.
 function layoutForReport(open) {
     document.body.classList.toggle('report-open', open);
-    if (!open) { const r = document.getElementById('report'); r.style.width = ''; r.style.maxWidth = ''; document.getElementById('map').style.right = ''; }
+    if (!open) {
+        const r = document.getElementById('report'); r.style.width = ''; r.style.maxWidth = '';
+        document.getElementById('map').style.right = ''; document.getElementById('panel').style.right = '';   /// restore full-width header
+        offsetControls();
+    }
     map.invalidateSize();
 }
 /// Size the panel to a whole number of thumbnail columns (no leftover gutter on the right),
@@ -979,7 +984,12 @@ function fitPanelWidth() {
     const leftover = content - (cols * CELL + (cols - 1) * GAP);
     const w = report.offsetWidth - Math.floor(leftover);   /// floor keeps all cols (leaves <1px, never drops one)
     report.style.maxWidth = 'none'; report.style.width = w + 'px';
-    if (reportActive) { document.getElementById('map').style.right = w + 'px'; map.invalidateSize(); }
+    if (reportActive) {
+        document.getElementById('map').style.right = w + 'px';
+        document.getElementById('panel').style.right = w + 'px';   /// shrink the header too so status/zoom stay visible
+        offsetControls(); placeTagCloud();                          /// panel width (and height, if it wraps) may have changed
+        map.invalidateSize();
+    }
 }
 
 /// ---- Switchers ----
