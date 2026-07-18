@@ -1035,6 +1035,12 @@ function set3DMode(on) {
     if (on) { map.dragging.disable(); loadPreview(dataset); }   /// warm the preview subset so the first drag is instant
     else { map.dragging.enable(); document.body.classList.remove('rotating'); }
 }
+/// Rotation angle (radians) for a drag of `len` pixels, scaled DOWN as you zoom in: each zoom level above the
+/// whole-cloud view roughly doubles the on-screen magnification, so halving the angle per level keeps the
+/// on-screen rotation speed consistent (a small drag on a zoomed-in detail rotates finely, not wildly).
+let fitZoom = map.getBoundsZoom(worldBounds);   /// zoom at which the whole plane (~the whole cloud) fits the viewport
+map.on('resize', () => { fitZoom = map.getBoundsZoom(worldBounds); });
+const rotAngle = (len) => len * 0.006 / Math.pow(2, Math.max(0, map.getZoom() - fitZoom - 1));
 /// ---- UMAP-3D rotation preview ----
 /// A 100k-point subset is loaded once per dataset (RowBinary x,y,z,color -> normalized coords + precomputed hue
 /// colour). While the user drags, this subset is rendered on an overlay canvas with the IN-PROGRESS rotation
@@ -1093,7 +1099,7 @@ function drawPreview(curX, curY) {
     const d = previewData[dataset];
     if (!d || d === 'loading' || pvCanvas.style.display === 'none') return;
     const dx = curX - rStart.x, dy = curY - rStart.y, len = Math.hypot(dx, dy);
-    const Rp = len < 0.5 ? R : matMul(axisAngle(-dy / len, dx / len, 0, len * 0.006), R);
+    const Rp = len < 0.5 ? R : matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);
     const r0 = Rp[0][0], r1 = Rp[0][1], r2 = Rp[0][2], r3 = Rp[1][0], r4 = Rp[1][1], r5 = Rp[1][2];
     const W = pvImg.width, H = pvImg.height, data = pvImg.data;
     pvU32.fill(0xFF000000);                                          /// opaque black background (hides the stale-orientation tiles)
@@ -1122,7 +1128,7 @@ async function endRotate(cx, cy, evForClick) {
     rotating = false; document.body.classList.remove('rotating');
     const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
     if (len < 5) { hideRotPreview(); if (evForClick) click3D(evForClick); return; }   /// negligible drag -> click -> report
-    R = matMul(axisAngle(-dy / len, dx / len, 0, len * 0.006), R);  /// pre-multiply: rotate in view space
+    R = matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);  /// pre-multiply: rotate in view space (angle slows with zoom)
     if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
     const done = redraw(); updateURL();                            /// NOT drawPreview(cx,cy), which would re-apply the drag)
