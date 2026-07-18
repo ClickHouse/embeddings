@@ -925,15 +925,16 @@ function previewImg(md5) {
     document.getElementById('full').style.display = 'block';
     loadMeta(md5);                                           /// author + license caption from yfcc_metadata
 }
-/// Look up author/license by the compact (stupidHex) md5 — served fast by the md5_stupid projection on
-/// yfcc_metadata (see scripts/setup_metadata_projection.py). Routed to website_thumbs, no parallel replicas.
+/// Look up author/license by the compact (stupidHex) md5 — pruned to one granule by the index-only
+/// md5_stupid projection on yfcc_metadata (see scripts/setup_metadata_projection.py). optimize_use_projection_filtering
+/// must be forced on: the website users pin compatibility=25.5, which defaults it off. Routed to website_thumbs.
 async function loadMeta(md5) {
     const meta = document.getElementById('full-meta'), seq = ++metaSeq;
     meta.textContent = '';
     const sql = `SELECT user_nickname, license_name, license_url FROM mmcommons.yfcc_metadata
         WHERE md5_stupid = {m:String} LIMIT 1 FORMAT JSONCompactEachRow`;
     try {
-        const url = chURL(`enable_parallel_replicas=0&default_format=JSONCompactEachRow&param_m=${encodeURIComponent(md5)}`, USER_THUMBS);
+        const url = chURL(`enable_parallel_replicas=0&optimize_use_projection_filtering=1&default_format=JSONCompactEachRow&param_m=${encodeURIComponent(md5)}`, USER_THUMBS);
         const txt = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
         if (seq !== metaSeq || !txt) return;                /// a newer preview superseded this lookup
         const [author, lic, licUrl] = JSON.parse(txt.split('\n')[0]);
