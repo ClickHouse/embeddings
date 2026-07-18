@@ -33,6 +33,12 @@
         display: flex; flex-wrap: wrap; gap: .5em; align-items: center;
         padding: .4em .6em; background: rgba(20,20,20,.88); font-size: 13px; }
     body.report-open #panel { right: min(40%, 640px); }   /* keep status/zoom clear of the top-K panel (exact width set in JS) */
+    /* full-bleed "Proudly made with ClickHouse" banner as the header's first row (as on adsb.exposed) */
+    #proud { flex: 0 0 calc(100% + 1.2em); box-sizing: border-box; margin: -.4em -.6em .2em; padding: .15em .6em;
+        text-align: center; font-family: sans-serif; font-size: 14px; color: #000; text-decoration: none;
+        background: linear-gradient(90deg, #fff 0%, #fff 15%, #ff0 50%, #fff 85%, #fff 100%); }
+    #proud:hover { background: linear-gradient(90deg, #ff0 0%, #ff0 15%, #fff 50%, #ff0 85%, #ff0 100%); }
+    #panel #proud b { color: #000; }   /* out-specify #panel b (yellow) so "ClickHouse" stays black on the gradient */
     #panel b { color: #ff0; }
     .grp { display: flex; gap: .15em; align-items: center; }
     .grp label { color: #999; margin-right: .25em; }
@@ -98,6 +104,7 @@
 <body>
 <div id="map"></div>
 <div id="panel">
+    <a id="proud" href="https://github.com/ClickHouse/ClickHouse" target="_blank" rel="noopener">Proudly made with <b>ClickHouse</b> open-source database</a>
     <b>Embeddings Explorer</b>
     <div class="grp"><label>dataset</label><span id="datasets"></span></div>
     <div class="grp"><label>mode</label><span id="modes"></span></div>
