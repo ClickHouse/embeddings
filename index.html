@@ -101,7 +101,7 @@
 const HOST = 'https://hvdvsqo23t.us-east-2.aws.clickhouse-staging.com:8443';
 const USER = 'website';                 /// heavy queries: tiles, top-100 search, click lookups
 const USER_THUMBS = 'website_thumbs';   /// point queries: thumbnail image loads (shares the password)
-const PASS = 'Embeddings-Viewer-2026!';
+const PASS = '';                        /// website / website_thumbs use an empty password (sha256 of empty string)
 const THUMBS = 'mmcommons.image_thumbs2';
 const S3 = 'https://multimedia-commons.s3.us-west-2.amazonaws.com/data/images';
 const TILE = 1024;                 /// tile pixel size
