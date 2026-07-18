@@ -21,7 +21,9 @@
     /* top-K result thumbnails overlaid on the point cloud, centered on each image's (x,y) point */
     .topk-marker { background: none; border: 0; }
     .topk-marker img { box-sizing: border-box; display: block; image-rendering: pixelated;
-        box-shadow: 0 0 5px #000; cursor: pointer; }
+        box-shadow: 0 0 5px #000; cursor: pointer; transition: filter .12s; }
+    /* tag-cloud hover: images lacking the hovered tag are dimmed (grid + map overlay) */
+    #grid img.dimmed, .topk-marker img.dimmed { filter: brightness(.5); }
     .topk-marker img.loading { width: 0 !important; height: 0 !important; border: 0 !important; box-shadow: none !important; }
     .leaflet-container { background: #000; }
     #panel { position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
@@ -297,7 +299,7 @@ function dataToLatLng(x, y) { const s = Math.pow(2, COORD_BITS) / TILE; return m
 function overlayIcon(md5, size) {
     /// start hidden (class 'loading' -> 0x0, no border); reveal onload so loading imgs don't show a border sliver
     return L.divIcon({ className: 'topk-marker',
-        html: `<img src="${thumbURL(md5)}" draggable="false" class="loading" onload="this.classList.remove('loading')" style="width:${size}px;height:${size}px">`,
+        html: `<img src="${thumbURL(md5)}" data-md5="${md5}" draggable="false" class="loading" onload="this.classList.remove('loading')" style="width:${size}px;height:${size}px">`,
         iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 function clearOverlay() { topkLayer.clearLayers(); overlayPts = []; }
@@ -491,16 +493,20 @@ async function updateTagCloud() {
     if (!reportActive || !md5s.length) { el.style.display = 'none'; return; }
     const seq = ++tagSeq;
     const inlist = md5s.map(m => `'${m}'`).join(',');   /// md5s are hex (stupidHex) -> safe to inline
-    const sql = `SELECT tag, count() c FROM (SELECT arrayJoin(user_tags) tag
-        FROM mmcommons.tags_by_md5 WHERE md5 IN (${inlist})) GROUP BY tag FORMAT JSONCompactEachRow`;
+    /// fetch per-md5 tags (deterministic -> cacheable): gives both the counts and the tag->md5s map for hover-dimming
+    const sql = `SELECT md5, user_tags FROM mmcommons.tags_by_md5 WHERE md5 IN (${inlist}) FORMAT JSONCompactEachRow`;
     try {
-        /// PK seek on md5 -> no PR; use the query cache, allowing arrayJoin (row-generating -> non-deterministic, else Code 704)
-        const resp = await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1&query_cache_nondeterministic_function_handling=save'),
-            { method: 'POST', body: sql });
+        const resp = await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1'), { method: 'POST', body: sql });  /// PK seek -> no PR
         if (!resp.ok) throw new Error(await resp.text());
         const txt = await resp.text();
         if (seq !== tagSeq || !reportActive) return;    /// a newer results set superseded this
-        const tags = txt.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));   /// [tag, count], by count desc
+        const counts = new Map(), tag2md5 = new Map();
+        for (const [md5, tgs] of txt.trim().split('\n').filter(Boolean).map(l => JSON.parse(l))) for (const t of tgs) {
+            counts.set(t, (counts.get(t) || 0) + 1);
+            let set = tag2md5.get(t); if (!set) tag2md5.set(t, set = new Set());
+            set.add(md5);
+        }
+        let tags = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100);   /// top 100 tags by frequency
         if (!tags.length) { el.style.display = 'none'; return; }
         const cnts = tags.map(t => t[1]);
         const max = Math.max(...cnts), min = Math.min(...cnts);
@@ -508,16 +514,36 @@ async function updateTagCloud() {
         el.replaceChildren();
         for (const [t, c] of tags) {                    /// size + colour by frequency: most -> white, yellow, orange <- least
             const f = max > min ? (c - min) / (max - min) : 1;
+            const md5set = tag2md5.get(t);
             const s = document.createElement('span');
             s.className = 't'; s.textContent = t; s.title = `${c} image${c === 1 ? '' : 's'}`;
             s.style.fontSize = (11 + f * 17).toFixed(1) + 'px';
             s.style.color = f >= 0.5 ? `rgb(255,255,${Math.round(255*(2*f-1))})`   /// white .. yellow
                                      : `rgb(255,${Math.round(165+180*f)},0)`;       /// yellow .. orange
+            s.onmouseenter = () => dimExcept(md5set);   /// hover a tag -> dim images that lack it (grid + map)
             el.appendChild(s);
         }
-        el.style.top = document.getElementById('panel').offsetHeight + 'px';
+        el.onmouseleave = clearDim;
         el.style.display = 'block';
+        placeTagCloud();                                /// top below the panel; right flush to the (trimmed) report panel
     } catch (e) { if (seq === tagSeq) el.style.display = 'none'; }
+}
+/// place the tag cloud under the top panel, its right edge flush to the report panel's actual left edge
+/// (the panel is trimmed to whole thumbnail columns by fitPanelWidth, so its width != the nominal min(40%,640px))
+function placeTagCloud() {
+    const el = document.getElementById('tagcloud');
+    if (el.style.display !== 'block') return;
+    el.style.top = document.getElementById('panel').offsetHeight + 'px';
+    el.style.right = Math.max(0, innerWidth - document.getElementById('report').getBoundingClientRect().left) + 'px';
+}
+window.addEventListener('resize', placeTagCloud);
+/// tag-cloud hover: dim (50% darker) every result image whose md5 lacks the hovered tag, in the grid and on the map
+function dimExcept(md5set) {
+    document.querySelectorAll('#grid img[data-md5], .topk-marker img[data-md5]').forEach(img =>
+        img.classList.toggle('dimmed', !md5set.has(img.dataset.md5)));
+}
+function clearDim() {
+    document.querySelectorAll('img.dimmed').forEach(img => img.classList.remove('dimmed'));
 }
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
 async function runSimilar(more) {
@@ -631,7 +657,7 @@ function thumbImg(md5, isQuery) {
     img.src = thumbURL(md5);
     img.title = isQuery ? 'query · hover to preview' : md5 + ' · click to search from here';
     if (isQuery) img.style.borderColor = '#ff0';
-    else img.onclick = () => showReport(md5);
+    else { img.dataset.md5 = md5; img.onclick = () => showReport(md5); }   /// data-md5 -> tag-cloud dimming
     img.onmouseenter = () => previewImg(md5);
     img.onmouseleave = hidePreview;
     return img;
