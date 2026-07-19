@@ -1,4 +1,4 @@
-# embeddings
+# [Embeddings.info](https://embeddings.info/)
 
 Datasets, pipelines, and an interactive explorer for large-scale image/text embeddings,
 built on ClickHouse. Companion in spirit to [adsb.exposed](https://github.com/ClickHouse/adsb.exposed)
