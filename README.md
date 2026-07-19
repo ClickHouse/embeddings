@@ -28,7 +28,7 @@ adsb tile math. Tiles are fast thanks to a `mortonEncode(x,y)` projection.
 
 ## Data (ClickHouse service, `mmcommons` and `ann` databases)
 
-- **`mmcommons.emb_{clip,nomic,siglip2}`** — ~99M / 99M / 94M YFCC100M image embeddings, `Array(BFloat16)`
+- **`mmcommons.emb_{clip,nomic,siglip2}`** — ~99.1M YFCC100M image embeddings, `Array(BFloat16)`
   (768 / 768 / 1152-d), keyed by stripped MD5.
 - **`mmcommons.image_thumbs` / `image_thumbs2`** — 99.1M gamma-correct 75×75 raw-RGB thumbnails
   (`v2` = center-square-crop + Lanczos-sharpened).
