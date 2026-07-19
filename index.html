@@ -109,7 +109,7 @@
     <div class="grp"><label>dataset</label><span id="datasets"></span></div>
     <div class="grp"><label>mode</label><span id="modes"></span></div>
     <div class="grp"><label>projection</label><span id="projs"></span></div>
-    <span id="hint3d">drag to rotate, Ctrl/Cmd+drag to pan</span>
+    <span id="hint3d">drag to rotate, right-drag or Ctrl/Cmd+drag to pan</span>
     <span id="status">ready</span>
     <span id="zoom" title="map zoom level"></span>
 </div>
@@ -1055,7 +1055,7 @@ buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
     else resetView();
     updateURL();
 });
-/// UMAP 3D: drag rotates the cloud, Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
+/// UMAP 3D: drag rotates the cloud, right-drag or Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
 function set3DMode(on) {
     document.body.classList.toggle('proj3d', on);
     if (on) { map.dragging.disable(); loadPreview(dataset); }   /// warm the preview subset so the first drag is instant
@@ -1165,15 +1165,17 @@ async function endRotate(cx, cy, evForClick) {
     if (!rotating) hideRotPreview();                                /// ...until the server tiles catch up (unless a new drag started)
 }
 map.getContainer().addEventListener('mousedown', (e) => {
-    if (!is3D() || e.button !== 0) return;
-    if (e.ctrlKey || e.metaKey) {                                   /// Ctrl/Cmd+drag pans the map (live) instead of rotating
+    if (!is3D()) return;
+    if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey))) {   /// right-drag OR Ctrl/Cmd+drag pans the map (live) instead of rotating
         panning = true; panStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
-    } else {
+    } else if (e.button === 0) {
         rotating = true; rStart = { x: e.clientX, y: e.clientY }; rMoved = 0; document.body.classList.add('rotating');
         hidePreview(); clearTagHl();   /// clear any hover full-image/tag highlight before it gets stuck behind the preview
         startPreview();
     }
 });
+/// suppress the browser context menu in 3D so a right-button drag can pan without popping the menu
+map.getContainer().addEventListener('contextmenu', (e) => { if (is3D()) e.preventDefault(); });
 addEventListener('mousemove', (e) => {
     if (panning) {   /// live pan (Leaflet drag is off in 3D so we drive panBy ourselves)
         map.panBy([panStart.x - e.clientX, panStart.y - e.clientY], { animate: false });
