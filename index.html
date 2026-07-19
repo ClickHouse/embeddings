@@ -81,9 +81,10 @@
     #full img { display: block; max-width: 42vw; max-height: 66vh; box-shadow: 0 0 40px #000;
         border: 2px solid #ff0; background: #000; }
     #full-meta { max-width: 42vw; margin-top: 2px; padding: 2px 5px; box-sizing: border-box;
+        min-height: calc(1.3em + 4px);   /* reserve one line up front so the image doesn't jump when the license loads */
         background: rgba(0,0,0,.8); color: #ddd; font-size: 12px; line-height: 1.3;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    #full-meta:empty { display: none; }
+    #full-meta:empty { background: transparent; }   /* keep the reserved space but stay invisible until author/license loads */
     #full-meta .lic { color: #8bc34a; }
     #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
         background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
