@@ -1,0 +1,12 @@
+# runtime artifacts — never commit
+venv/
+venv_umap/
+emb/
+umap_work/
+__pycache__/
+*.pyc
+*.log
+*.out
+prefixes*.txt
+finish_sig.*.txt
+clickhouse
