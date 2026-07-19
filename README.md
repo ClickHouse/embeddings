@@ -4,6 +4,10 @@ Datasets, pipelines, and an interactive explorer for large-scale image/text embe
 built on ClickHouse. Companion in spirit to [adsb.exposed](https://github.com/ClickHouse/adsb.exposed)
 and [reversedns.space](https://github.com/ClickHouse/reversedns.space).
 
+<img width="1325" height="971" alt="Screenshot_20260718_225129" src="https://github.com/user-attachments/assets/58de543d-aa71-41f5-872a-5d8202c5e420" />
+<img width="1325" height="971" alt="Screenshot_20260718_212238" src="https://github.com/user-attachments/assets/a3eb925f-0596-47e8-9c9b-9b2a7fd477ad" />
+<img width="1337" height="972" alt="Screenshot_20260718_030041" src="https://github.com/user-attachments/assets/134a2bd6-f8d4-4528-b8e3-2fa4ffd63a07" />
+
 ## Explorer website (`index.html`)
 
 A zoomable, tile-rendered map of an embedding "sphere" — the whole corpus projected to 2-D via a
