@@ -23,6 +23,23 @@
         box-shadow: 0 0 12px #000; }
     /* top-K result thumbnails overlaid on the point cloud, centered on each image's (x,y) point */
     .topk-marker { background: none; border: 0; }
+    /* HackerNews top-K: small dots on the map (no thumbnails) */
+    .topk-dot { background: #ff0; border: 1.5px solid #000; border-radius: 50%; box-shadow: 0 0 4px #000; }
+    body.corpus-hn #modes-grp { display: none; }   /* HN has no thumbnails -> no points/thumbs choice */
+    /* HackerNews comment cards: report grid rows + the bottom-left hover preview */
+    #grid.hn { display: block; }
+    .hncard { display: block; width: 100%; box-sizing: border-box; margin: 0 0 6px; padding: 6px 8px;
+        background: #1c1c1c; border: 1px solid #333; border-left: 3px solid #ff0; cursor: pointer; }
+    .hncard:hover { background: #262626; }
+    .hncard.dimmed { filter: brightness(.5); }
+    .hnmeta { color: #9ab; font-size: 11px; margin-bottom: 3px; }
+    .hnmeta b { color: #ddd; }
+    .hnmeta a { color: #ff8; }
+    .hntext { color: #ddd; font-size: 12px; line-height: 1.35; white-space: pre-wrap; word-break: break-word;
+        max-height: 6.8em; overflow: hidden; }
+    #full-comment { display: none; max-width: 42vw; padding: 8px 10px; box-sizing: border-box;
+        background: rgba(0,0,0,.85); color: #ddd; font-size: 13px; line-height: 1.4; }
+    #full-comment .hntext { max-height: 60vh; overflow: auto; }
     .topk-marker img { box-sizing: border-box; display: block; image-rendering: pixelated;
         box-shadow: 0 0 5px #000; cursor: pointer; transition: filter .12s; }
     /* tag-cloud hover: images lacking the hovered tag are dimmed (grid + map overlay) */
@@ -107,8 +124,9 @@
 <div id="panel">
     <a id="proud" href="https://github.com/ClickHouse/ClickHouse" target="_blank" rel="noopener">Proudly made with <b>ClickHouse</b> open-source database</a>
     <b>Embeddings Explorer</b>
+    <div class="grp"><label>corpus</label><span id="corpora"></span></div>
     <div class="grp"><label>model</label><span id="datasets"></span></div>
-    <div class="grp"><label>mode</label><span id="modes"></span></div>
+    <div class="grp" id="modes-grp"><label>mode</label><span id="modes"></span></div>
     <div class="grp"><label>projection</label><span id="projs"></span></div>
     <span id="hint3d">drag to rotate, right-drag or Ctrl/Cmd+drag to pan</span>
     <span id="status">ready</span>
@@ -116,7 +134,7 @@
 </div>
 <div id="tagcloud"></div>
 <div id="report"><div id="report-body"></div></div>
-<div id="full"><img id="full-img"><div id="full-meta"></div></div>
+<div id="full"><img id="full-img"><div id="full-comment"></div><div id="full-meta"></div></div>
 <img id="hover">
 
 <div id="error"></div>
@@ -150,6 +168,7 @@ const QBIT = {
     'Int8|original':     { col: 'embedding_int',         rot: false },
     'Int8|rotated':      { col: 'embedding_rotated_int', rot: true  },
 };
+let corpus = 'photos';    /// 'photos' (YFCC/Multimedia-Commons images) | 'hn' (HackerNews comments)
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
 let proj = 'linear';      /// 'linear' | 'UMAP' | 'UMAP 3D'
@@ -185,7 +204,55 @@ const U3D = {
     clip:    { cx: 1.6235,  cy: 0.4215,  cz: 1.7995,  s: 7.0865,  clo: -6.046, chi: 4.728, q99: 2576 },
     nomic:   { cx: 1.6845,  cy: -0.8155, cz: -0.4245, s: 7.1585,  clo: -6.13,  chi: 3.885, q99: 3061 },
 };
-let curReport = null;                                       /// md5 of the open report
+/// ---- Corpora ----------------------------------------------------------------------------------------------
+/// Two datasets share the whole Explorer. Each corpus has its own KEY column (md5 vs id), table families,
+/// embedding MODELS (with per-model original/rotated dims + UMAP-2D brightness quantile uq99), UMAP-3D render
+/// constants (u3d), available projections & view modes, and hover/report RENDER kind (image thumbnail vs comment).
+/// HackerNews: 18 models (qwen3_8b excluded — no UMAP tables, 4096-d/1.1TiB); all unit-normalised so int8 uses
+/// x*sqrt(dim) companding; randomHadamardTransform does not pad any HN dim, so rdim == dim.
+const HN_MODELS = {
+    nomic:{dim:768,rdim:768,uq99:2418}, minilm:{dim:384,rdim:384,uq99:2427},
+    bge_small:{dim:384,rdim:384,uq99:1903}, bge_base:{dim:768,rdim:768,uq99:1435}, bge_large:{dim:1024,rdim:1024,uq99:4047},
+    e5_small:{dim:384,rdim:384,uq99:3225}, e5_base:{dim:768,rdim:768,uq99:2665}, e5_large:{dim:1024,rdim:1024,uq99:2683},
+    gte_small:{dim:384,rdim:384,uq99:1731}, gte_base:{dim:768,rdim:768,uq99:2264},
+    arctic_xs:{dim:384,rdim:384,uq99:1706}, arctic_m:{dim:768,rdim:768,uq99:1860},
+    jina_small:{dim:512,rdim:512,uq99:1840}, jina_v3:{dim:1024,rdim:1024,uq99:2088},
+    granite_small:{dim:384,rdim:384,uq99:2428}, embeddinggemma:{dim:768,rdim:768,uq99:2789},
+    kalm:{dim:896,rdim:896,uq99:2959}, bow:{dim:8192,rdim:8192,uq99:3473},
+};
+const HN_U3D = {
+    nomic:{cx:6.6998,cy:8.4517,cz:7.0587,s:13.9534,clo:-5.8219,chi:18.7149,q99:10590},
+    minilm:{cx:-5.6794,cy:8.5372,cz:-7.7432,s:14.5927,clo:-13.5008,chi:11.0106,q99:8536},
+    bge_small:{cx:-7.9544,cy:3.8447,cz:-2.7311,s:15.0222,clo:-3.6191,chi:17.4707,q99:8028},
+    bge_base:{cx:8.9502,cy:6.8545,cz:-5.4031,s:13.1932,clo:-6.1745,chi:14.3095,q99:8152},
+    bge_large:{cx:9.4193,cy:6.5888,cz:4.6556,s:16.4183,clo:-7.1147,chi:16.6721,q99:13865},
+    e5_small:{cx:8.1809,cy:7.604,cz:-5.9489,s:15.9674,clo:-16.5262,chi:20.1746,q99:12522},
+    e5_base:{cx:-7.5419,cy:-8.1511,cz:-4.6026,s:15.7284,clo:-9.4603,chi:20.0327,q99:12573},
+    e5_large:{cx:6.6975,cy:6.789,cz:-6.6092,s:16.3282,clo:-18.887,chi:16.7164,q99:11417},
+    gte_small:{cx:-8.4914,cy:-5.976,cz:-5.829,s:13.3733,clo:-2.4923,chi:16.6668,q99:5675},
+    gte_base:{cx:7.1121,cy:-4.3628,cz:2.4986,s:17.8622,clo:-16.7269,chi:10.8457,q99:9417},
+    arctic_xs:{cx:-6.4658,cy:6.7346,cz:-6.1648,s:12.5585,clo:-2.2259,chi:18.8572,q99:5218},
+    arctic_m:{cx:-5.6483,cy:8.6027,cz:-6.8316,s:14.423,clo:-9.1807,chi:22.5875,q99:8869},
+    jina_small:{cx:-8.3232,cy:5.7957,cz:-2.8034,s:12.5963,clo:-3.5065,chi:9.5866,q99:6321},
+    jina_v3:{cx:-7.5054,cy:7.8504,cz:-6.1956,s:13.6053,clo:-4.8103,chi:21.2451,q99:6940},
+    granite_small:{cx:-7.694,cy:8.8357,cz:5.1561,s:15.72,clo:-11.34,chi:14.9382,q99:16115},
+    embeddinggemma:{cx:7.7635,cy:5.2072,cz:4.561,s:15.0837,clo:-5.1281,chi:18.7967,q99:6502},
+    kalm:{cx:-7.5525,cy:4.6083,cz:-5.5582,s:12.9469,clo:-12.9847,chi:3.1717,q99:5910},
+    bow:{cx:1.3705,cy:1.1665,cz:-3.4653,s:24.0288,clo:-16.7225,chi:22.6358,q99:21040},
+};
+const CORPORA = {
+    photos: { label: 'Photos', key: 'md5', keyType: 'String', models: DATASETS, u3d: U3D, def: 'siglip2',
+        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image',
+        emb: m => `mmcommons.emb_${m}`, u2: m => `mmcommons.umap_${m}_2d`, u3: m => `mmcommons.umap_${m}_3d` },
+    hn: { label: 'HackerNews', key: 'id', keyType: 'UInt32', models: HN_MODELS, u3d: HN_U3D, def: 'nomic',
+        projs: ['UMAP', 'UMAP 3D'], modes: ['points'], render: 'comment',
+        emb: m => `default.hackernews_embeddings_${m}`, u2: m => `default.hackernews_umap_${m}_2d`, u3: m => `default.hackernews_umap_${m}_3d` },
+};
+const C = () => CORPORA[corpus];        /// current corpus config
+const curModel = () => C().models[dataset];
+const KEY = () => C().key;              /// key column name in SQL ('md5' | 'id')
+const isHN = () => corpus === 'hn';
+let curReport = null;                                       /// key (md5 | id) of the open report
 let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
 let repAbort = null;                                        /// aborts a still-running scan when switching
 let repTarget = 0;      /// desired # of result images (grows 2x on scroll)
@@ -201,14 +268,15 @@ let rep = { type: 'Int8', rot: 'rotated', bits: 2, dims: 384 };
 /// Map projection: linear uses the emb_<ds> table (x,y,z); UMAP uses umap_<ds>_2d (mx,my,mz).
 /// The similarity SEARCH always runs on the emb table (umap tables have no embeddings).
 function projCfg() {
-    if (proj === 'UMAP 3D') return { table: `mmcommons.umap_${dataset}_3d`, three: true, q99: U3D[dataset].q99 };
-    if (proj === 'UMAP')    return { table: `mmcommons.umap_${dataset}_2d`, xc: 'mx', yc: 'my', zc: 'mz',
-                                     q99: DATASETS[dataset].uq99 || DATASETS[dataset].q99 };
-    return { table: DATASETS[dataset].table, xc: 'x', yc: 'y', zc: 'z', q99: DATASETS[dataset].q99 };
+    const c = C(), m = dataset;
+    if (proj === 'UMAP 3D') return { table: c.u3(m), three: true, q99: c.u3d[m].q99 };
+    if (proj === 'UMAP')    return { table: c.u2(m), xc: 'mx', yc: 'my', zc: 'mz',
+                                     q99: c.models[m].uq99 || c.models[m].q99 };
+    return { table: c.emb(m), xc: 'x', yc: 'y', zc: 'z', q99: c.models[m].q99 };   /// linear (Photos only)
 }
 const curTable = () => projCfg().table;
 /// QBit dim is dataset-aware: rotated cols use the dataset's rotated dim (rdim), others its original dim.
-const qbitInfo = () => { const q = QBIT[`${rep.type}|${rep.rot}`], d = DATASETS[dataset]; return { col: q.col, dim: q.rot ? d.rdim : d.dim }; };
+const qbitInfo = () => { const q = QBIT[`${rep.type}|${rep.rot}`], d = curModel(); return { col: q.col, dim: q.rot ? d.rdim : d.dim }; };
 const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
 const repMaxDims = () => qbitInfo().dim;
 
@@ -279,7 +347,7 @@ function thumbCellsSQL(table) {
 }
 /// 3D thumbnail cells: one representative md5 per 75px cell of the ROTATED projection (full scan, like tileSQL3d).
 function thumbCellsSQL3d(table) {
-    const CELL = 75, u = U3D[dataset];
+    const CELL = 75, u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
     const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`, PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
@@ -299,7 +367,7 @@ function thumbCellsSQL3d(table) {
 /// UMAP 3D: orthographic projection of the rotated 3D cloud into the 2^32 square, aggregated per tile pixel.
 /// Projection depends on rotation -> no morton index -> full scan (~1s). rx,ry = rows 0,1 of the view matrix R.
 function tileSQL3d(table, q99) {
-    const u = U3D[dataset];
+    const u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`;   /// screen x = row 0 of R · (nx,ny,nz)
     const ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;   /// screen y = row 1 of R · (nx,ny,nz)
@@ -476,6 +544,7 @@ const MAX_THUMB = 75, MIN_THUMB = 12;
 /// inverse of latlngToData: data coords (0..2^32) -> CRS.Simple latlng
 function dataToLatLng(x, y) { const s = Math.pow(2, COORD_BITS) / TILE; return map.unproject([x / s, y / s], 0); }
 function overlayIcon(md5, size) {
+    if (isHN()) return L.divIcon({ className: 'topk-dot', html: '', iconSize: [12, 12], iconAnchor: [6, 6] });   /// HN: small dot, not a thumbnail
     /// start hidden (class 'loading' -> 0x0, no border); reveal onload so loading imgs don't show a border sliver
     return L.divIcon({ className: 'topk-marker',
         html: `<img src="${thumbURL(md5)}" data-md5="${md5}" draggable="false" class="loading" onload="this.classList.remove('loading')" style="width:${size}px;height:${size}px">`,
@@ -487,10 +556,11 @@ function clearOverlay() { topkLayer.clearLayers(); overlayPts = []; }
 async function umapCoords(md5s) {
     const m = new Map();
     if (!md5s.length) return m;
-    const sql = `SELECT md5, mx, my FROM mmcommons.umap_${dataset}_2d WHERE md5 IN (${md5s.map(x => `'${x}'`).join(',')}) FORMAT JSONCompactEachRow`;
+    const inlist = md5s.map(x => C().keyType === 'String' ? `'${x}'` : x).join(',');   /// native ids -> PK seek
+    const sql = `SELECT ${KEY()} AS k, mx, my FROM ${C().u2(dataset)} WHERE ${KEY()} IN (${inlist}) FORMAT JSONCompactEachRow`;
     try {
         const txt = await (await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1'), { method: 'POST', body: sql })).text();
-        for (const l of txt.trim().split('\n')) if (l) { const [md5, mx, my] = JSON.parse(l); m.set(md5, { md5, x: mx, y: my }); }
+        for (const l of txt.trim().split('\n')) if (l) { const [k, mx, my] = JSON.parse(l); m.set(String(k), { md5: String(k), x: mx, y: my }); }
     } catch (e) {}
     return m;
 }
@@ -498,16 +568,17 @@ async function umapCoords(md5s) {
 async function umap3dCoords(md5s) {
     const m = new Map();
     if (!md5s.length) return m;
-    const sql = `SELECT md5, x, y, z FROM mmcommons.umap_${dataset}_3d WHERE md5 IN (${md5s.map(x => `'${x}'`).join(',')}) FORMAT JSONCompactEachRow`;
+    const inlist = md5s.map(x => C().keyType === 'String' ? `'${x}'` : x).join(',');   /// native ids -> PK seek
+    const sql = `SELECT ${KEY()} AS k, x, y, z FROM ${C().u3(dataset)} WHERE ${KEY()} IN (${inlist}) FORMAT JSONCompactEachRow`;
     try {
         const txt = await (await fetch(chURL('enable_parallel_replicas=0&use_query_cache=1'), { method: 'POST', body: sql })).text();
-        for (const l of txt.trim().split('\n')) if (l) { const [md5, x, y, z] = JSON.parse(l); m.set(md5, { md5, x, y, z }); }
+        for (const l of txt.trim().split('\n')) if (l) { const [k, x, y, z] = JSON.parse(l); m.set(String(k), { md5: String(k), x, y, z }); }
     } catch (e) {}
     return m;
 }
 /// project raw UMAP-3D coords through the current rotation R into data coords (0..2^32) — same math as tileSQL3d
 function project3dData(x, y, z) {
-    const u = U3D[dataset];
+    const u = C().u3d[dataset];
     const nx = (x - u.cx) / u.s, ny = (y - u.cy) / u.s, nz = (z - u.cz) / u.s;
     const rx = R[0][0]*nx + R[0][1]*ny + R[0][2]*nz, ry = R[1][0]*nx + R[1][1]*ny + R[1][2]*nz;
     return { x: (rx * U3D_PS + 0.5) * 4294967295, y: (ry * U3D_PS + 0.5) * 4294967295 };
@@ -547,7 +618,7 @@ function reprojectOverlay3D() {
 /// Size each thumbnail to its nearest-neighbor screen distance (clamped) so overlapping ones shrink.
 /// Screen distances depend only on zoom, so recompute after load and on zoomend. Grid = O(n).
 function sizeOverlay() {
-    if (!overlayPts.length) return;
+    if (!overlayPts.length || isHN()) return;   /// HN overlay is fixed-size dots — no nearest-neighbour resizing
     const CELL = MAX_THUMB, grid = new Map();
     for (const p of overlayPts) p.cp = map.latLngToContainerPoint(p.ll);
     for (const p of overlayPts) {
@@ -604,7 +675,7 @@ map.on('click', async (e) => {
         /// nearest visible point to the click
         const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
         const r = Math.max(1, Math.round(px * 6));
-        const sql = `SELECT md5 FROM ${table}
+        const sql = `SELECT ${KEY()} FROM ${table}
             WHERE ${xc} BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
               AND ${yc} BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
             ORDER BY pow(toInt64(${xc}) - toInt64({cx:UInt32}), 2) + pow(toInt64(${yc}) - toInt64({cy:UInt32}), 2) ASC
@@ -631,7 +702,7 @@ map.on('movestart zoomstart', () => { hideHover(); hidePreview(); });           
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
 function nearest3dMd5(cp) {
-    const d = previewData[dataset];
+    const d = previewData[corpus + ':' + dataset];
     if (!d || d === 'loading') { loadPreview(dataset); return null; }
     const t = previewTransform(), { n, nx, ny, nz, md5 } = d;
     const r0 = R[0][0], r1 = R[0][1], r2 = R[0][2], r3 = R[1][0], r4 = R[1][1], r5 = R[1][2];
@@ -668,7 +739,7 @@ async function hoverPreview(latlng, cp) {
     const px = Math.pow(2, COORD_BITS - map.getZoom()) / TILE, r = Math.max(1, Math.round(px * 6));
     /// nearest point via the morton projection; routed to website_thumbs (point-query user) not to compete with reports
     const { table: pt, xc, yc } = projCfg();
-    const sql = `SELECT md5 FROM ${pt}
+    const sql = `SELECT ${KEY()} FROM ${pt}
         WHERE ${xc} BETWEEN {cx:UInt32} - {r:UInt32} AND {cx:UInt32} + {r:UInt32}
           AND ${yc} BETWEEN {cy:UInt32} - {r:UInt32} AND {cy:UInt32} + {r:UInt32}
         ORDER BY pow(toInt64(${xc}) - toInt64({cx:UInt32}), 2) + pow(toInt64(${yc}) - toInt64({cy:UInt32}), 2) ASC LIMIT 1 FORMAT TSV`;
@@ -698,8 +769,10 @@ function showReport(md5) {
         reportActive = true; topkLayer.addTo(map); applyMode();
     }
     if (!document.getElementById('grid')) buildReportShell();
-    document.getElementById('rc-query').innerHTML =
-        `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
+    document.getElementById('grid').classList.toggle('hn', isHN());   /// comment-list layout vs thumbnail grid
+    document.getElementById('rc-query').innerHTML = isHN()
+        ? `<a href="https://news.ycombinator.com/item?id=${curReport}" target=_blank>comment #${curReport}</a> · ${dataset}`
+        : `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
     buildRepScales();
     fitPanelWidth();                                         /// size the panel to a whole number of columns
 
@@ -713,9 +786,13 @@ function showReport(md5) {
 /// how many result thumbnails fill ~1.5 panel pages (the initial load size)
 function pages15() {
     const grid = document.getElementById('grid'), rep = document.getElementById('report');
+    const gridTop = grid.getBoundingClientRect().top - rep.getBoundingClientRect().top;
+    if (isHN()) {                                          /// comment cards: one column, ~76px tall each
+        const rows = Math.max(3, Math.floor((rep.clientHeight - gridTop) / 76));
+        return Math.min(MAX_RESULTS, Math.ceil(rows * 1.5));
+    }
     const cell = 78;   /// 75px thumbnail + 3px gap
     const cols = Math.max(1, Math.floor((grid.clientWidth + 3) / cell));
-    const gridTop = grid.getBoundingClientRect().top - rep.getBoundingClientRect().top;
     const rows = Math.max(2, Math.floor((rep.clientHeight - gridTop) / cell));
     return Math.min(MAX_RESULTS, Math.ceil(cols * rows * 1.5));
 }
@@ -741,7 +818,7 @@ function buildReportShell() {
 /// bits/dims ranges depend on type & rotation, so rebuild them on every switch
 function buildRepScales() {
     buildSwitch('rc-bits', Array.from({length: repMaxBits()}, (_, i) => i + 1), rep.bits, v => { rep.bits = +v; switchRep(); });
-    const dims = []; for (let d = 128; d <= repMaxDims(); d += 128) dims.push(d);
+    const dims = []; for (let d = 128; d <= Math.min(repMaxDims(), 2048); d += 128) dims.push(d);   /// cap chips (bow is 8192-d)
     buildSwitch('rc-dims', dims, rep.dims, v => { rep.dims = +v; switchRep(); });
 }
 /// Switch representation on the SAME target — keeps the current pictures dimmed until the new load.
@@ -758,6 +835,7 @@ function switchRep() {
 /// Fetch user_tags for the current top-K results and render a frequency-sized tag cloud over the map.
 async function updateTagCloud() {
     const el = document.getElementById('tagcloud');
+    if (isHN()) { el.style.display = 'none'; return; }   /// HackerNews comments have no user tags
     const md5s = repMd5s.slice(0, 1000);
     if (!reportActive || !md5s.length) { el.style.display = 'none'; return; }
     const seq = ++tagSeq;
@@ -828,7 +906,7 @@ function clearTagHl() {
 }
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
 async function runSimilar(more) {
-    const table = DATASETS[dataset].table, col = qbitInfo().col, md5 = curReport;   /// SEARCH always on emb (umap has no embeddings)
+    const table = C().emb(dataset), col = qbitInfo().col, md5 = curReport;   /// SEARCH always on emb (umap has no embeddings)
     /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
     const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
     const grid = document.getElementById('grid'), stats = document.getElementById('rep-stats');
@@ -842,7 +920,7 @@ async function runSimilar(more) {
     if (!more) {
         /// first open: show the query thumbnail immediately; a switch keeps the old pictures dimmed until loaded
         if (grid.children.length) grid.classList.add('loading');
-        else grid.replaceChildren(thumbImg(md5, true));
+        else grid.replaceChildren(...(isHN() ? [] : [thumbImg(md5, true)]));   /// HN: header shows the query comment
     }
     bar.style.display = 'block'; barFill.style.width = '0%';
     stats.textContent = more ? 'loading more…' : `running: ${col} · ${rep.bits} bits · ${rep.dims} dims…`;
@@ -851,15 +929,20 @@ async function runSimilar(more) {
         const total = await tableRows(table);               /// bar denominator (progress.total_rows_to_read is unreliable w/ parallel replicas)
         if (seq !== repSeq) return;
         /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
-        const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE md5 = {md5:String} LIMIT 1) AS q
-            SELECT md5, x, y FROM ${table}
-            WHERE md5 != {md5:String}
-            ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC, md5 ASC
+        /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return the id + comment
+        /// fields so the report cards render with no extra lookup (the emb table carries author/text/time inline).
+        const sel = isHN()
+            ? `toString(${KEY()}) AS md5, "by", substringUTF8(text, 1, 300) AS text, formatDateTime(time, '%Y-%m-%d') AS ts`
+            : `md5, x, y`;
+        const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
+            SELECT ${sel} FROM ${table}
+            WHERE ${KEY()} != {k:${C().keyType}}
+            ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC, ${KEY()} ASC
             LIMIT {off:UInt32}, {cnt:UInt32} FORMAT JSONEachRowWithProgress`;
         /// BFloat16 cosineDistanceTransposed + scalar arg + parallel replicas hits a CH bug -> disable PR for it; Int8 ok
         const noPR = rep.type === 'BFloat16' ? '&enable_parallel_replicas=0' : '';
         const url = chURL(`replace_running_query=1${noPR}` +
-            `&param_md5=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`);
+            `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`);
         const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
         if (!resp.ok) throw new Error(await resp.text());
         const reader = resp.body.getReader(), decoder = new TextDecoder();
@@ -888,13 +971,13 @@ async function runSimilar(more) {
         if (seq !== repSeq) return;                          /// a newer switch superseded this run (it owns repLoading)
         bar.style.display = 'none';
         if (more) {
-            for (const r of rows) grid.appendChild(thumbImg(r.md5, false));   /// append the next page (keeps scroll position)
+            for (const r of rows) grid.appendChild(resultNode(r));   /// append the next page (keeps scroll position)
             addOverlayThumbs(rows);                                           /// and place them on the map
             repLoaded += rows.length;
             for (const r of rows) { repMd5s.push(r.md5); lastRows.push(r); }
         } else {
-            const next = [thumbImg(md5, true)];                            /// rebuild: query thumb + results
-            for (const r of rows) next.push(thumbImg(r.md5, false));
+            const next = isHN() ? [] : [thumbImg(md5, true)];             /// Photos: query thumb first; HN: header shows the query
+            for (const r of rows) next.push(resultNode(r));
             grid.replaceChildren(...next);
             grid.classList.remove('loading');
             clearOverlay();                                               /// refresh the on-map overlay
@@ -944,11 +1027,50 @@ function thumbImg(md5, isQuery) {
     img.onmouseleave = () => { hidePreview(); clearTagHl(); };
     return img;
 }
+/// A top-K result node: an image thumbnail (Photos) or a comment card (HackerNews). Click re-targets the search.
+function resultNode(row) { return isHN() ? commentCard(row) : thumbImg(row.md5, false); }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c])); }
+function commentCard(row) {
+    const id = row.md5;                                     /// row.md5 holds the HackerNews id (as a string)
+    const div = document.createElement('div');
+    div.className = 'hncard'; div.dataset.md5 = id;
+    div.innerHTML = `<div class="hnmeta"><b>${esc(row.by || '—')}</b> · ${row.ts || ''} · ` +
+        `<a href="https://news.ycombinator.com/item?id=${id}" target="_blank" rel="noopener" onclick="event.stopPropagation()">item ↗</a></div>` +
+        `<div class="hntext">${esc(row.text || '')}</div>`;
+    div.onclick = () => showReport(id);                     /// click a comment -> search from it
+    div.onmouseenter = () => previewComment(id);            /// hover -> full comment in the bottom-left card
+    div.onmouseleave = () => hidePreview();
+    return div;
+}
 let metaSeq = 0;
 function previewImg(md5) {
-    document.getElementById('full-img').src = fullURL(md5);
+    if (isHN()) return previewComment(md5);
+    document.getElementById('full-comment').style.display = 'none';
+    document.getElementById('full-meta').style.display = '';
+    const img = document.getElementById('full-img'); img.style.display = '';
+    img.src = fullURL(md5);
     document.getElementById('full').style.display = 'block';
     loadMeta(md5);                                           /// author + license caption from yfcc_metadata
+}
+/// HackerNews preview: the comment (author · date · text) with a link to the HN item, in the bottom-left card.
+async function previewComment(id) {
+    const seq = ++metaSeq;
+    document.getElementById('full-img').style.display = 'none';
+    document.getElementById('full-meta').style.display = 'none';
+    const cm = document.getElementById('full-comment'); cm.style.display = 'block';
+    cm.innerHTML = '<div class="hnmeta">loading…</div>';
+    document.getElementById('full').style.display = 'block';
+    const sql = `SELECT "by", formatDateTime(time, '%Y-%m-%d %H:%i') AS ts, text FROM ${C().emb(dataset)}
+        WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1 FORMAT JSONCompactEachRow`;
+    try {
+        const url = chURL(`enable_parallel_replicas=0&default_format=JSONCompactEachRow&param_k=${encodeURIComponent(id)}`, USER_THUMBS);
+        const txt = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
+        if (seq !== metaSeq || !txt) return;                /// a newer preview superseded this lookup
+        const [by, ts, text] = JSON.parse(txt.split('\n')[0]);
+        cm.innerHTML = `<div class="hnmeta"><b>${esc(by || '—')}</b> · ${ts || ''} · ` +
+            `<a href="https://news.ycombinator.com/item?id=${id}" target="_blank" rel="noopener">item ↗</a></div>` +
+            `<div class="hntext">${esc(text || '')}</div>`;
+    } catch (e) { /* ignore transient metadata errors */ }
 }
 /// Look up author/license by the compact (stupidHex) md5 — pruned to one granule by the index-only
 /// md5_stupid projection on yfcc_metadata (see scripts/setup_metadata_projection.py). optimize_use_projection_filtering
@@ -991,6 +1113,16 @@ function layoutForReport(open) {
 function fitPanelWidth() {
     const report = document.getElementById('report'), grid = document.getElementById('grid');
     if (!grid) return;
+    if (isHN()) {   /// comment list: keep the CSS panel width (no whole-column trim), just match the map/header edge
+        report.style.width = ''; report.style.maxWidth = '';
+        if (reportActive) {
+            const w = report.offsetWidth;
+            document.getElementById('map').style.right = w + 'px';
+            document.getElementById('panel').style.right = w + 'px';
+            offsetControls(); placeTagCloud(); map.invalidateSize();
+        }
+        return;
+    }
     report.style.width = ''; report.style.maxWidth = '';   /// back to CSS (40% / 640px) to measure
     const CELL = 75, GAP = 3, cs = getComputedStyle(grid);
     const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
@@ -1019,9 +1151,12 @@ function buildSwitch(elemId, keys, current, onPick) {
 }
 /// ---- init: restore state from the URL hash, build the UI, then keep the URL in sync ----
 const urlp = new URLSearchParams(location.hash.slice(1));
-if (DATASETS[urlp.get('ds')]) dataset = urlp.get('ds');
-if (urlp.get('mode') === 'points' || urlp.get('mode') === 'thumbs') mode = urlp.get('mode');
-if (['linear', 'UMAP', 'UMAP 3D'].includes(urlp.get('proj'))) proj = urlp.get('proj');
+if (CORPORA[urlp.get('corpus')]) corpus = urlp.get('corpus');
+dataset = C().models[urlp.get('ds')] ? urlp.get('ds') : (C().models[dataset] ? dataset : C().def);
+if (C().modes.includes(urlp.get('mode'))) mode = urlp.get('mode');
+if (!C().modes.includes(mode)) mode = C().modes[0];
+if (C().projs.includes(urlp.get('proj'))) proj = urlp.get('proj');
+if (!C().projs.includes(proj)) proj = C().projs.includes('UMAP') ? 'UMAP' : C().projs[0];
 if (is3D() && urlp.get('r3d')) {
     const a = urlp.get('r3d').split(',').map(Number);   /// rows 0,1 of R; row 2 = cross (R is orthonormal)
     if (a.length === 6 && a.every(Number.isFinite)) R = [[a[0],a[1],a[2]], [a[3],a[4],a[5]], cross([a[0],a[1],a[2]], [a[3],a[4],a[5]])];
@@ -1031,31 +1166,61 @@ if (urlp.get('rot')) rep.rot = urlp.get('rot');
 if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
 if (+urlp.get('dims')) rep.dims = +urlp.get('dims');
 
-buildSwitch('datasets', Object.keys(DATASETS), dataset, k => {
-    dataset = k;
-    rep.dims = Math.min(rep.dims, repMaxDims());   /// keep the selected #dims if the new embedding supports it, else clamp to its max
-    if (is3D()) loadPreview(dataset);              /// warm the preview subset for the new dataset
-    makeLayer();
-    /// if a report is open, rerun the top-100 for the SAME target in the newly selected dataset and fit to it;
-    /// otherwise reset to the initial zoomed-out view (the new dataset's layout differs from the old one)
-    if (reportActive && curReport) { armFit(); fitOverlayNext = true; showReport(curReport); }
-    else resetView();
-    updateURL();
-});
-buildSwitch('modes', ['points', 'thumbs'], mode, k => {
-    mode = k;
-    if (k === 'thumbs' && reportActive) hideReport();   /// thumbs mode has no top-K panel — close it on switch
-    hideHover(); applyMode(); updateURL();               /// toggle the thumb overlay; keep the point cloud as-is
-});
-buildSwitch('projs', ['linear', 'UMAP', 'UMAP 3D'], proj, k => {
-    proj = k;
+/// The model / mode / projection switches depend on the current corpus, so they are (re)built on a corpus change.
+function buildModelSwitch() {
+    buildSwitch('datasets', Object.keys(C().models), dataset, k => {
+        dataset = k;
+        rep.dims = Math.min(rep.dims, repMaxDims());   /// keep the selected #dims if the new embedding supports it, else clamp to its max
+        if (is3D()) loadPreview(dataset);              /// warm the preview subset for the new dataset
+        makeLayer();
+        /// if a report is open, rerun the top-100 for the SAME target in the newly selected model and fit to it;
+        /// otherwise reset to the initial zoomed-out view (the new model's layout differs from the old one)
+        if (reportActive && curReport) { armFit(); fitOverlayNext = true; showReport(curReport); }
+        else resetView();
+        updateURL();
+    });
+}
+function buildModeSwitch() {
+    buildSwitch('modes', C().modes, mode, k => {
+        mode = k;
+        if (k === 'thumbs' && reportActive) hideReport();   /// thumbs mode has no top-K panel — close it on switch
+        hideHover(); applyMode(); updateURL();               /// toggle the thumb overlay; keep the point cloud as-is
+    });
+}
+function buildProjSwitch() {
+    buildSwitch('projs', C().projs, proj, k => {
+        proj = k;
+        set3DMode(is3D());
+        hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
+        /// re-place the top-K overlay for the new projection (incl. 3D) and fit to it; else reset to the full view
+        if (reportActive) { armFit(); clearOverlay(); addOverlayThumbs(lastRows).then(() => { if (!mapTouchedSinceSwitch) fitToOverlay(); }); }
+        else resetView();
+        updateURL();
+    });
+}
+/// Corpus switch (Photos <-> HackerNews): reset to the corpus default model, fix up mode/projection to ones the
+/// corpus supports, rebuild the dependent switches, and rebuild the map. Any open report is corpus-specific -> close it.
+function switchCorpus(k) {
+    if (k === corpus || !CORPORA[k]) return;
+    corpus = k;
+    document.body.classList.toggle('corpus-hn', isHN());
+    if (reportActive) hideReport();
+    dataset = C().def;
+    if (!C().modes.includes(mode)) mode = C().modes[0];
+    if (!C().projs.includes(proj)) proj = C().projs.includes('UMAP') ? 'UMAP' : C().projs[0];
+    buildModelSwitch(); buildModeSwitch(); buildProjSwitch();
     set3DMode(is3D());
-    hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
-    /// re-place the top-K overlay for the new projection (incl. 3D) and fit to it; else reset to the full view
-    if (reportActive) { armFit(); clearOverlay(); addOverlayThumbs(lastRows).then(() => { if (!mapTouchedSinceSwitch) fitToOverlay(); }); }
-    else resetView();
+    hideHover(); hidePreview();
+    makeLayer();
+    resetView();
     updateURL();
-});
+}
+buildSwitch('corpora', Object.keys(CORPORA).map(k => CORPORA[k].label), C().label, label =>
+    switchCorpus(Object.keys(CORPORA).find(c => CORPORA[c].label === label)));
+buildModelSwitch();
+buildModeSwitch();
+buildProjSwitch();
+document.body.classList.toggle('corpus-hn', isHN());
 /// UMAP 3D: drag rotates the cloud, right-drag or Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
 function set3DMode(on) {
     document.body.classList.toggle('proj3d', on);
@@ -1079,12 +1244,13 @@ Object.assign(pvCanvas.style, { position: 'absolute', left: '0', top: '0', zInde
 const pvCtx = pvCanvas.getContext('2d', { colorSpace: CANVAS_CS });   /// match the point-cloud tiles' gamut (Display-P3)
 let pvImg = null, pvU32 = null, pvT = null;       /// reused ImageData + its Uint32 view; data->container transform
 async function loadPreview(ds) {
-    if (previewData[ds]) return;                  /// already loaded or loading
-    previewData[ds] = 'loading';
+    const pk = corpus + ':' + ds;                 /// key the subset by corpus+model (model names collide, e.g. nomic)
+    if (previewData[pk]) return;                  /// already loaded or loading
+    previewData[pk] = 'loading';
     try {
-        const u = U3D[ds], crange = u.chi - u.clo;
-        /// x,y,z,color (fixed 16 bytes) + md5 (varint-length string; used for client-side hover nearest lookup)
-        const buf = await (await chQuery(`SELECT x, y, z, color, md5 FROM mmcommons.umap_${ds}_3d LIMIT ${PREVIEW_N} FORMAT RowBinary`, {})).arrayBuffer();
+        const u = C().u3d[ds], crange = u.chi - u.clo;
+        /// x,y,z,color (fixed 16 bytes) + key (varint-length string; toString() so HN's id UInt32 reads like an md5)
+        const buf = await (await chQuery(`SELECT x, y, z, color, toString(${KEY()}) FROM ${C().u3(ds)} LIMIT ${PREVIEW_N} FORMAT RowBinary`, {})).arrayBuffer();
         const dv = new DataView(buf), bytes = new Uint8Array(buf), td = new TextDecoder();
         const nx = [], ny = [], nz = [], cr = [], cg = [], cb = [], md5 = [];
         let o = 0;
@@ -1098,10 +1264,10 @@ async function loadPreview(ds) {
             const hue = Math.max(0, Math.min(1, (c - u.clo) / crange)), rgb = oklchToRGB(0.75, 0.16, hue * 360);
             cr.push(rgb[0] * PREVIEW_ALPHA); cg.push(rgb[1] * PREVIEW_ALPHA); cb.push(rgb[2] * PREVIEW_ALPHA);
         }
-        previewData[ds] = { n: md5.length, md5,
+        previewData[pk] = { n: md5.length, md5,
             nx: Float32Array.from(nx), ny: Float32Array.from(ny), nz: Float32Array.from(nz),
             cr: Uint8Array.from(cr), cg: Uint8Array.from(cg), cb: Uint8Array.from(cb) };
-    } catch (e) { previewData[ds] = null; }        /// on failure just skip the preview (release still re-renders)
+    } catch (e) { previewData[pk] = null; }        /// on failure just skip the preview (release still re-renders)
 }
 /// data coords (0..2^32) -> container pixels is affine at a fixed map view; capture it once per drag.
 function previewTransform() {
@@ -1112,7 +1278,7 @@ function previewTransform() {
     return { SX: ax * U3D_PS, OX: P0.x + ax * 0.5, SY: ay * U3D_PS, OY: P0.y + ay * 0.5 };
 }
 function startPreview() {
-    const d = previewData[dataset];
+    const d = previewData[corpus + ':' + dataset];
     if (!d || d === 'loading') { loadPreview(dataset); return; }   /// not ready -> no preview for this drag
     const cont = map.getContainer(), W = cont.clientWidth, H = cont.clientHeight;
     pvCanvas.width = W; pvCanvas.height = H;
@@ -1123,7 +1289,7 @@ function startPreview() {
 }
 /// render the subset with the rotation the drag WOULD commit right now (same arcball math as endRotate)
 function drawPreview(curX, curY) {
-    const d = previewData[dataset];
+    const d = previewData[corpus + ':' + dataset];
     if (!d || d === 'loading' || pvCanvas.style.display === 'none') return;
     const dx = curX - rStart.x, dy = curY - rStart.y, len = Math.hypot(dx, dy);
     const Rp = len < 0.5 ? R : matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);
@@ -1206,11 +1372,11 @@ async function click3D(e) {
     /// thumbs: open the report for EXACTLY the clicked thumbnail — read from the rendered tiles, no query
     if (mode === 'thumbs' && !reportActive) { const m = thumbMd5At(latlngToData(map.mouseEventToLatLng(e))); if (m) showReport(m); else setStatus('no thumbnail here'); return; }
     if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }   /// click the hovered image (instant)
-    const u = U3D[dataset], d = latlngToData(map.mouseEventToLatLng(e));
+    const u = C().u3d[dataset], d = latlngToData(map.mouseEventToLatLng(e));
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const PX = `toUInt32(least(1.,greatest(0.,({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
     const PY = `toUInt32(least(1.,greatest(0.,({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})*${U3D_PS}+0.5))*4294967295)`;
-    const sql = `SELECT md5 FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM mmcommons.umap_${dataset}_3d)
+    const sql = `SELECT k FROM (SELECT ${KEY()} AS k, ${PX} AS PX, ${PY} AS PY FROM ${C().u3(dataset)})
         ORDER BY pow(toInt64(PX)-toInt64({cx:UInt32}),2)+pow(toInt64(PY)-toInt64({cy:UInt32}),2) ASC LIMIT 1 FORMAT TSV`;
     setStatus('finding point…');
     try {
@@ -1233,12 +1399,12 @@ addEventListener('keydown', (e) => { if (e.key === 'Escape' && reportActive) hid
 /// "Significant" state (dataset, mode, projection, open report + its params) makes a NEW history entry so
 /// Back/Forward step through those; view-only changes (pan/zoom/rotation) and Back/Forward restores update
 /// the current entry in place (replaceState) — so scrolling around doesn't flood history.
-function sigOf(p) { return ['ds', 'mode', 'proj', 'md5', 'type', 'rot', 'bits', 'dims'].map(k => p.get(k) || '').join('|'); }
+function sigOf(p) { return ['corpus', 'ds', 'mode', 'proj', 'md5', 'type', 'rot', 'bits', 'dims'].map(k => p.get(k) || '').join('|'); }
 let lastSig = null, restoring = false;
 function updateURL() {
     const c = latlngToData(map.getCenter());
     const p = new URLSearchParams();
-    p.set('ds', dataset); p.set('mode', mode); p.set('proj', proj);
+    p.set('corpus', corpus); p.set('ds', dataset); p.set('mode', mode); p.set('proj', proj);
     if (is3D()) { const rp = rotParams(); p.set('r3d', [rp.r0,rp.r1,rp.r2,rp.r3,rp.r4,rp.r5].map(v => v.toFixed(5)).join(',')); }
     p.set('z', Math.round(map.getZoom())); p.set('x', c.x); p.set('y', c.y);
     if (reportActive && curReport) {
@@ -1257,12 +1423,21 @@ function selectSwitch(id, value) {   /// reflect a value in an already-built swi
 function applyState(urlp) {
     restoring = true;
     try {
-        const nd = DATASETS[urlp.get('ds')] ? urlp.get('ds') : dataset;
-        const nm = (urlp.get('mode') === 'points' || urlp.get('mode') === 'thumbs') ? urlp.get('mode') : mode;
-        const np = ['linear', 'UMAP', 'UMAP 3D'].includes(urlp.get('proj')) ? urlp.get('proj') : proj;
-        const dsChanged = nd !== dataset;
+        const nc = CORPORA[urlp.get('corpus')] ? urlp.get('corpus') : corpus;
+        const corpusChanged = nc !== corpus;
+        corpus = nc;
+        const cc = C();
+        const nd = cc.models[urlp.get('ds')] ? urlp.get('ds') : (cc.models[dataset] ? dataset : cc.def);
+        const nm = cc.modes.includes(urlp.get('mode')) ? urlp.get('mode') : (cc.modes.includes(mode) ? mode : cc.modes[0]);
+        const np = cc.projs.includes(urlp.get('proj')) ? urlp.get('proj') : (cc.projs.includes(proj) ? proj : (cc.projs.includes('UMAP') ? 'UMAP' : cc.projs[0]));
+        const dsChanged = nd !== dataset || corpusChanged;
         dataset = nd; mode = nm; proj = np;
-        selectSwitch('datasets', dataset); selectSwitch('modes', mode); selectSwitch('projs', proj);
+        if (corpusChanged) {
+            document.body.classList.toggle('corpus-hn', isHN());
+            buildModelSwitch(); buildModeSwitch(); buildProjSwitch(); selectSwitch('corpora', C().label);
+        } else {
+            selectSwitch('datasets', dataset); selectSwitch('modes', mode); selectSwitch('projs', proj);
+        }
         R = [[1,0,0],[0,1,0],[0,0,1]];
         if (is3D() && urlp.get('r3d')) { const a = urlp.get('r3d').split(',').map(Number);
             if (a.length === 6 && a.every(Number.isFinite)) R = [[a[0],a[1],a[2]], [a[3],a[4],a[5]], cross([a[0],a[1],a[2]], [a[3],a[4],a[5]])]; }
