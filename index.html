@@ -245,7 +245,7 @@ const CORPORA = {
         projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image',
         emb: m => `mmcommons.emb_${m}`, u2: m => `mmcommons.umap_${m}_2d`, u3: m => `mmcommons.umap_${m}_3d` },
     hn: { label: 'HackerNews', key: 'id', keyType: 'UInt32', models: HN_MODELS, u3d: HN_U3D, def: 'nomic',
-        projs: ['UMAP', 'UMAP 3D'], modes: ['points'], render: 'comment',
+        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points'], render: 'comment',
         emb: m => `default.hackernews_embeddings_${m}`, u2: m => `default.hackernews_umap_${m}_2d`, u3: m => `default.hackernews_umap_${m}_3d` },
 };
 const C = () => CORPORA[corpus];        /// current corpus config
@@ -272,7 +272,7 @@ function projCfg() {
     if (proj === 'UMAP 3D') return { table: c.u3(m), three: true, q99: c.u3d[m].q99 };
     if (proj === 'UMAP')    return { table: c.u2(m), xc: 'mx', yc: 'my', zc: 'mz',
                                      q99: c.models[m].uq99 || c.models[m].q99 };
-    return { table: c.emb(m), xc: 'x', yc: 'y', zc: 'z', q99: c.models[m].q99 };   /// linear (Photos only)
+    return { table: c.emb(m), xc: 'x', yc: 'y', zc: 'z', q99: c.models[m].q99 || c.models[m].uq99 };   /// linear: x,y,z = mapped sums of 3 embedding thirds
 }
 const curTable = () => projCfg().table;
 /// QBit dim is dataset-aware: rotated cols use the dataset's rotated dim (rdim), others its original dim.
