@@ -12,6 +12,7 @@
     #map { position: absolute; inset: 0; background: #000; cursor: crosshair; }
     body.proj3d #map { cursor: grab; }                              /* UMAP 3D: drag to rotate */
     body.proj3d.rotating #map, body.rotating { cursor: grabbing; }
+    body.zoomdrag #map, body.zoomdrag { cursor: ns-resize; }   /* 2D right-button / modifier drag-to-zoom */
     /* when the report is open, shrink the map so the panel sits beside it (no overlap) */
     body.report-open #map { right: min(40%, 640px); }
     /* keep Leaflet's top controls (zoom) clear of the top header bar; JS refines to exact panel height */
@@ -678,6 +679,7 @@ function latlngToData(latlng) {
 /// ---- Click -> nearest point -> report ----
 map.on('click', async (e) => {
     if (is3D()) return;                                  /// 3D handles click via its own drag/rotate mouseup
+    if (e.originalEvent && (e.originalEvent.ctrlKey || e.originalEvent.metaKey || e.originalEvent.altKey)) return;   /// modifier+drag was a zoom gesture, not a click
     const d = latlngToData(e.latlng);
     /// thumbs: open the report for EXACTLY the clicked thumbnail — read from the rendered tiles, no query
     if (mode === 'thumbs') { const m = thumbMd5At(d); if (m) showReport(m); else setStatus('no thumbnail here'); return; }
@@ -1411,6 +1413,7 @@ function hideRotPreview() { if (pvRAF) { cancelAnimationFrame(pvRAF); pvRAF = nu
 /// normal span the rotation plane; the rotation axis is the in-screen vector perpendicular to d, i.e. (-dy,dx,0)
 /// (so the visible projection plane itself is never rotated — points tilt into/out of depth along the drag).
 let rotating = false, rStart = null, rMoved = 0, panning = false, panStart = null;
+let zooming = false, zStart = null;   /// 2D: right-button / modifier drag-to-zoom
 async function endRotate(cx, cy, evForClick) {
     rotating = false; document.body.classList.remove('rotating');
     /// click vs rotate is decided by the MAX movement during the drag (rMoved), not the start->end distance:
@@ -1435,8 +1438,19 @@ map.getContainer().addEventListener('mousedown', (e) => {
         startPreview();
     }
 });
-/// suppress the browser context menu in 3D so a right-button drag can pan without popping the menu
-map.getContainer().addEventListener('contextmenu', (e) => { if (is3D()) e.preventDefault(); });
+/// 2D (linear/UMAP): a right-button drag, or a modifier (Ctrl/Cmd/Alt) + drag, zooms the map (drag up = in).
+/// Capture phase + stopPropagation so Leaflet's own pan-drag never starts for this gesture.
+map.getContainer().addEventListener('mousedown', (e) => {
+    if (is3D()) return;
+    if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey || e.altKey))) {
+        zooming = true;
+        zStart = { y: e.clientY, zoom: map.getZoom(), latlng: map.mouseEventToLatLng(e) };
+        map.dragging.disable(); document.body.classList.add('zoomdrag');
+        e.preventDefault(); e.stopPropagation();
+    }
+}, true);
+/// suppress the browser context menu over the map so a right-button drag (zoom in 2D, pan in 3D) doesn't pop it
+map.getContainer().addEventListener('contextmenu', (e) => e.preventDefault());
 addEventListener('mousemove', (e) => {
     if (panning) {   /// live pan (Leaflet drag is off in 3D so we drive panBy ourselves)
         map.panBy([panStart.x - e.clientX, panStart.y - e.clientY], { animate: false });
@@ -1444,11 +1458,15 @@ addEventListener('mousemove', (e) => {
     } else if (rotating) {
         rMoved = Math.max(rMoved, Math.hypot(e.clientX - rStart.x, e.clientY - rStart.y));   /// track max movement (click vs rotate)
         requestPreview(e.clientX, e.clientY);   /// live rotation preview
+    } else if (zooming) {   /// 2D drag-to-zoom around the drag's start point (drag up = zoom in)
+        const z = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), Math.round(zStart.zoom + (zStart.y - e.clientY) / 70)));
+        if (z !== map.getZoom()) map.setZoomAround(zStart.latlng, z, { animate: false });
     }
 });
 addEventListener('mouseup', (e) => {
     if (panning) { panning = false; document.body.classList.remove('rotating'); updateURL(); }
     else if (rotating) endRotate(e.clientX, e.clientY, e);
+    else if (zooming) { zooming = false; map.dragging.enable(); document.body.classList.remove('zoomdrag'); updateURL(); }
 });
 map.getContainer().addEventListener('touchstart', (e) => {
     if (!is3D() || e.touches.length !== 1) return;
