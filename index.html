@@ -292,8 +292,8 @@ const repMaxDims = () => qbitInfo().dim;
 function chURL(extra, user) {
     return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}&${extra}`;
 }
-async function chQuery(sql, params, fmt) {
-    let extra = `default_format=${fmt || 'RowBinary'}&replace_running_query=1`;
+async function chQuery(sql, params, fmt, settings) {
+    let extra = `default_format=${fmt || 'RowBinary'}&replace_running_query=1${settings ? '&' + settings : ''}`;
     for (const k in (params || {})) extra += `&param_${k}=${encodeURIComponent(params[k])}`;
     const resp = await fetch(chURL(extra), { method: 'POST', body: sql });
     if (!resp.ok) throw new Error(await resp.text());
@@ -502,7 +502,8 @@ async function renderWordTile(coords, canvas) {
     try {
         let sql = wordCellsSQL(table);
         if (is3D()) { Object.assign(p, rotParams()); sql = wordCellsSQL3d(table); }
-        const cells = new Uint8Array(await (await chQuery(sql, p)).arrayBuffer());
+        /// dictGet is "non-deterministic" to the query cache; the dict is static (LIFETIME 0) so caching is safe
+        const cells = new Uint8Array(await (await chQuery(sql, p, 'RowBinary', 'query_cache_nondeterministic_function_handling=save')).arrayBuffer());
         ctx.clearRect(0, 0, TILE, TILE);
         ctx.font = '600 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
