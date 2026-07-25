@@ -538,19 +538,26 @@ async function drawWords() {
                 } }
             let sw = 0, mx = 0, my = 0;
             for (const q of comp) { sw += q.cnt; mx += (q.cx + 0.5) * q.cnt; my += (q.cy + 0.5) * q.cnt; }
-            labels.push({ word: c.word, cx: mx / sw, cy: my / sw, n: comp.length });
+            labels.push({ word: c.word, cx: mx / sw, cy: my / sw, n: comp.length, dens: sw / comp.length });   /// dens = avg points per cell (segment density)
         }
         const ctx = wordCtx;
         ctx.clearRect(0, 0, W, H);
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
         labels.sort((u, v) => u.n - v.n);   /// draw the big (merged) labels last, on top
+        /// Word brightness tracks the segment's point density: dense core = white, sparse edges = dark gray.
+        /// Normalise against the 90th-percentile density currently in view so the ramp is stable across zooms.
+        const densSorted = labels.map(l => l.dens).slice().sort((a, b) => a - b);
+        const densRef = densSorted.length ? (densSorted[Math.floor(densSorted.length * 0.9)] || densSorted[densSorted.length - 1]) : 1;
         wordLabels = [];   /// remember screen pos + data centroid of each drawn word for click hit-testing
         for (const L of labels) {
             const dxc = x0 + L.cx * cw, dyc = y0 + L.cy * ch;
             const sp = map.latLngToContainerPoint(dataToLatLng(dxc, dyc));
             if (sp.x < -40 || sp.y < -20 || sp.x > W + 40 || sp.y > H + 20) continue;
             const fs = Math.min(30, 11 + 4 * Math.log2(1 + L.n));   /// larger when more merged
+            const t = Math.pow(Math.min(1, L.dens / densRef), 0.75);   /// 0 (edge) .. 1 (dense core)
+            const v = Math.round(75 + 180 * t);                        /// dark gray (#4b4b4b) -> white (#fff)
+            ctx.fillStyle = `rgb(${v},${v},${v})`;
             ctx.font = `600 ${fs.toFixed(1)}px sans-serif`;
             ctx.fillText(L.word, sp.x, sp.y);
             wordLabels.push({ word: L.word, sx: sp.x, sy: sp.y, dataX: dxc, dataY: dyc, fs });
