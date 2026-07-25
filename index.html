@@ -373,14 +373,16 @@ function thumbCellsSQL3d(table) {
 /// ---- HackerNews "words" mode: a contrasting-word cloud (analogue of Photos "thumbs"). One representative word
 /// per grid cell = the most frequent of the per-comment top contrasting words (precomputed in
 /// hackernews_topwords, looked up per record via the hackernews_topwords_dict dictionary — no per-tile scan).
-const WORDCELL = 110;
+/// non-square cells: wide enough for a word, but short so rows pack densely (text is wide, not tall)
+const WORDCELL_W = 96, WORDCELL_H = 38;
 function wordCellsSQL(table) {
-    const CELL = WORDCELL; const { xc, yc } = projCfg();
+    const CW = WORDCELL_W, CH = WORDCELL_H; const { xc, yc } = projCfg();
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, intDiv(ts * ${CELL}, ${TILE}) AS cell
-    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, topK(1)(word)[1] AS word
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
+        greatest(intDiv(ts * ${CW}, ${TILE}), 1) AS cellw, greatest(intDiv(ts * ${CH}, ${TILE}), 1) AS cellh
+    SELECT (cx * ${CW})::UInt16 AS px, (cy * ${CH})::UInt16 AS py, topK(1)(word)[1] AS word
     FROM (
-        SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy,
+        SELECT intDiv(${xc} - tx0, cellw) AS cx, intDiv(${yc} - ty0, cellh) AS cy,
                arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', ${KEY()})) AS word
         FROM ${table}
         WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
@@ -389,15 +391,16 @@ function wordCellsSQL(table) {
     FORMAT RowBinary`;
 }
 function wordCellsSQL3d(table) {
-    const CELL = WORDCELL, u = C().u3d[dataset];
+    const CW = WORDCELL_W, CH = WORDCELL_H, u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
     const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`, PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, intDiv(ts * ${CELL}, ${TILE}) AS cell
-    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, topK(1)(word)[1] AS word
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
+        greatest(intDiv(ts * ${CW}, ${TILE}), 1) AS cellw, greatest(intDiv(ts * ${CH}, ${TILE}), 1) AS cellh
+    SELECT (cx * ${CW})::UInt16 AS px, (cy * ${CH})::UInt16 AS py, topK(1)(word)[1] AS word
     FROM (
-        SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy,
+        SELECT intDiv(PX - tx0, cellw) AS cx, intDiv(PY - ty0, cellh) AS cy,
                arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', id)) AS word
         FROM (SELECT ${KEY()} AS id, ${PX} AS PX, ${PY} AS PY FROM ${table})
         WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
@@ -511,7 +514,7 @@ async function renderWordTile(coords, canvas) {
         while (o + 4 < cells.length) {
             const px = cells[o] | (cells[o+1] << 8), py = cells[o+2] | (cells[o+3] << 8); o += 4;
             const len = cells[o++]; const word = td.decode(cells.subarray(o, o + len)); o += len;
-            ctx.fillText(word, px + WORDCELL / 2, py + WORDCELL / 2);   /// centre the word in its cell
+            ctx.fillText(word, px + WORDCELL_W / 2, py + WORDCELL_H / 2);   /// centre the word in its cell
         }
         hideError();
     } catch (e) { showError(String(e).slice(0, 500)); }
