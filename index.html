@@ -1413,7 +1413,7 @@ function hideRotPreview() { if (pvRAF) { cancelAnimationFrame(pvRAF); pvRAF = nu
 /// normal span the rotation plane; the rotation axis is the in-screen vector perpendicular to d, i.e. (-dy,dx,0)
 /// (so the visible projection plane itself is never rotated — points tilt into/out of depth along the drag).
 let rotating = false, rStart = null, rMoved = 0, panning = false, panStart = null;
-let zooming = false, zStart = null;   /// 2D: right-button / modifier drag-to-zoom
+let zooming = false, zStart = null, zRAF = 0, zTarget = 0;   /// 2D: right-button / modifier smooth drag-to-zoom
 async function endRotate(cx, cy, evForClick) {
     rotating = false; document.body.classList.remove('rotating');
     /// click vs rotate is decided by the MAX movement during the drag (rMoved), not the start->end distance:
@@ -1445,6 +1445,7 @@ map.getContainer().addEventListener('mousedown', (e) => {
     if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey || e.altKey))) {
         zooming = true;
         zStart = { y: e.clientY, zoom: map.getZoom(), latlng: map.mouseEventToLatLng(e) };
+        map.options.zoomSnap = 0;   /// allow fractional zoom during the drag (smooth)
         map.dragging.disable(); document.body.classList.add('zoomdrag');
         e.preventDefault(); e.stopPropagation();
     }
@@ -1458,15 +1459,21 @@ addEventListener('mousemove', (e) => {
     } else if (rotating) {
         rMoved = Math.max(rMoved, Math.hypot(e.clientX - rStart.x, e.clientY - rStart.y));   /// track max movement (click vs rotate)
         requestPreview(e.clientX, e.clientY);   /// live rotation preview
-    } else if (zooming) {   /// 2D drag-to-zoom around the drag's start point (drag up = zoom in)
-        const z = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), Math.round(zStart.zoom + (zStart.y - e.clientY) / 70)));
-        if (z !== map.getZoom()) map.setZoomAround(zStart.latlng, z, { animate: false });
+    } else if (zooming) {   /// 2D smooth drag-to-zoom around the drag's start point (drag up = zoom in), rAF-throttled
+        zTarget = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zStart.zoom + (zStart.y - e.clientY) / 70));
+        if (!zRAF) zRAF = requestAnimationFrame(() => { zRAF = 0; if (zooming) map.setZoomAround(zStart.latlng, zTarget, { animate: false }); });
     }
 });
 addEventListener('mouseup', (e) => {
     if (panning) { panning = false; document.body.classList.remove('rotating'); updateURL(); }
     else if (rotating) endRotate(e.clientX, e.clientY, e);
-    else if (zooming) { zooming = false; map.dragging.enable(); document.body.classList.remove('zoomdrag'); updateURL(); }
+    else if (zooming) {
+        zooming = false;
+        if (zRAF) { cancelAnimationFrame(zRAF); zRAF = 0; }
+        map.options.zoomSnap = 1;                                                          /// restore integer snapping (wheel/buttons)
+        map.setZoomAround(zStart.latlng, Math.round(map.getZoom()), { animate: true });    /// settle to a crisp integer zoom level
+        map.dragging.enable(); document.body.classList.remove('zoomdrag'); updateURL();
+    }
 });
 map.getContainer().addEventListener('touchstart', (e) => {
     if (!is3D() || e.touches.length !== 1) return;
