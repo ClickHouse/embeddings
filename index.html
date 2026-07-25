@@ -31,7 +31,7 @@
         white-space: nowrap; box-shadow: 0 0 6px #000; }
     .topk-dot span { display: block; width: 100%; height: 100%; border-radius: 50%; box-sizing: border-box;
         border: 1px solid rgba(0,0,0,.75); box-shadow: 0 0 3px rgba(0,0,0,.9); }
-    body.corpus-hn #modes-grp { display: none; }   /* HN has no thumbnails -> no points/thumbs choice */
+    /* mode groups shown for both corpora (Photos: points/thumbs; HackerNews: points/words) */
     /* HackerNews comment cards: report grid rows + the bottom-left hover preview */
     #grid.hn { display: block; }
     .hncard { display: block; width: 100%; box-sizing: border-box; margin: 0 0 6px; padding: 6px 8px;
@@ -253,7 +253,7 @@ const CORPORA = {
         projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image',
         emb: m => `mmcommons.emb_${m}`, u2: m => `mmcommons.umap_${m}_2d`, u3: m => `mmcommons.umap_${m}_3d` },
     hn: { label: 'HackerNews', key: 'id', keyType: 'UInt32', models: HN_MODELS, u3d: HN_U3D, def: 'nomic',
-        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points'], render: 'comment',
+        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'words'], render: 'comment',
         emb: m => `default.hackernews_embeddings_${m}`, u2: m => `default.hackernews_umap_${m}_2d`, u3: m => `default.hackernews_umap_${m}_3d` },
 };
 const C = () => CORPORA[corpus];        /// current corpus config
@@ -370,6 +370,41 @@ function thumbCellsSQL3d(table) {
     GROUP BY cx, cy
     FORMAT RowBinary`;
 }
+/// ---- HackerNews "words" mode: a contrasting-word cloud (analogue of Photos "thumbs"). One representative word
+/// per grid cell = the most frequent of the per-comment top contrasting words (precomputed in
+/// hackernews_topwords, looked up per record via the hackernews_topwords_dict dictionary — no per-tile scan).
+const WORDCELL = 110;
+function wordCellsSQL(table) {
+    const CELL = WORDCELL; const { xc, yc } = projCfg();
+    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, intDiv(ts * ${CELL}, ${TILE}) AS cell
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, topK(1)(word)[1] AS word
+    FROM (
+        SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy,
+               arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', ${KEY()})) AS word
+        FROM ${table}
+        WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
+    )
+    GROUP BY cx, cy
+    FORMAT RowBinary`;
+}
+function wordCellsSQL3d(table) {
+    const CELL = WORDCELL, u = C().u3d[dataset];
+    const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
+    const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
+    const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`, PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
+    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, intDiv(ts * ${CELL}, ${TILE}) AS cell
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, topK(1)(word)[1] AS word
+    FROM (
+        SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy,
+               arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', id)) AS word
+        FROM (SELECT ${KEY()} AS id, ${PX} AS PX, ${PY} AS PY FROM ${table})
+        WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
+    )
+    GROUP BY cx, cy
+    FORMAT RowBinary`;
+}
 
 /// ---- Rendering ----
 /// UMAP 3D: orthographic projection of the rotated 3D cloud into the 2^32 square, aggregated per tile pixel.
@@ -459,6 +494,27 @@ function drawThumb(ctx, px, py, md5) {
     im.onload = () => ctx.drawImage(im, px, py, 75, 75);
     im.src = thumbURL(md5);
 }
+/// HackerNews "words" tile: draw one contrasting word per grid cell as centred text (a map word cloud).
+async function renderWordTile(coords, canvas) {
+    const { table } = projCfg();
+    const p = { z: coords.z, x: coords.x, y: coords.y };
+    const ctx = canvas.getContext('2d');
+    try {
+        let sql = wordCellsSQL(table);
+        if (is3D()) { Object.assign(p, rotParams()); sql = wordCellsSQL3d(table); }
+        const cells = new Uint8Array(await (await chQuery(sql, p)).arrayBuffer());
+        ctx.clearRect(0, 0, TILE, TILE);
+        ctx.font = '600 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
+        const td = new TextDecoder(); let o = 0;
+        while (o + 4 < cells.length) {
+            const px = cells[o] | (cells[o+1] << 8), py = cells[o+2] | (cells[o+3] << 8); o += 4;
+            const len = cells[o++]; const word = td.decode(cells.subarray(o, o + len)); o += len;
+            ctx.fillText(word, px + WORDCELL / 2, py + WORDCELL / 2);   /// centre the word in its cell
+        }
+        hideError();
+    } catch (e) { showError(String(e).slice(0, 500)); }
+}
 /// The md5 of the thumbnail DRAWN at data-coord d (thumbs mode) — read straight from the rendered tiles'
 /// stored cell maps, so a click needs no query and hits exactly the displayed image (works in 2D and 3D).
 function thumbMd5At(d) {
@@ -516,7 +572,7 @@ function makeLayer() {
     if (pointLayer) map.removeLayer(pointLayer);
     if (thumbLayer) map.removeLayer(thumbLayer);
     pointLayer = makeGrid(renderTile, 1);
-    thumbLayer = makeGrid(renderThumbTile, 2);
+    thumbLayer = makeGrid(isHN() ? renderWordTile : renderThumbTile, 2);   /// HN overlay = contrasting-word cloud; Photos = thumbnails
     pointLayer.addTo(map);
     applyMode();   /// add the thumb overlay + dim the point cloud if the current mode is 2D thumbs
 }
@@ -525,9 +581,9 @@ function makeLayer() {
 /// hidden in a report (point cloud shown full-brightness under the top-K overlay) and in UMAP 3D.
 function applyMode() {
     if (!pointLayer) return;
-    const showThumbs = mode === 'thumbs' && !reportActive;   /// thumbnail overlay in 2D and (rotated) in UMAP 3D
-    pointLayer.setOpacity(showThumbs ? 0.5 : 1);
-    if (showThumbs) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
+    const showOverlay = mode !== 'points' && !reportActive;   /// thumbs (Photos) / words (HN) overlay; dims the cloud beneath
+    pointLayer.setOpacity(showOverlay ? 0.5 : 1);
+    if (showOverlay) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
     else if (map.hasLayer(thumbLayer)) map.removeLayer(thumbLayer);
 }
 /// Re-render the point cloud for projection / 3D-rotation changes (tile coordinates genuinely change),
@@ -731,7 +787,7 @@ map.on('mousemove', (e) => {
     if (thumbsHover()) hidePreview();                       /// hide the thumbs full-image preview while moving (NOT in topK: the
     if (rotating || panning) return;                        /// overlay markers own #full there via their own mouseover/mouseout)
     const ll = e.latlng, cp = e.containerPoint;
-    if (mode === 'points') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);           /// nearest point -> small thumbnail
+    if (mode === 'points' || mode === 'words') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);   /// nearest point -> thumbnail (Photos) / comment (HN); also under the word cloud
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
 map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear thumbs/comment preview (tag box cleared by hideHover)
@@ -1279,7 +1335,7 @@ function buildModelSwitch() {
 function buildModeSwitch() {
     buildSwitch('modes', C().modes, mode, k => {
         mode = k;
-        if (k === 'thumbs' && reportActive) hideReport();   /// thumbs mode has no top-K panel — close it on switch
+        if (k !== 'points' && reportActive) hideReport();   /// overlay modes (thumbs/words) have no top-K panel — close it on switch
         hideHover(); applyMode(); updateURL();               /// toggle the thumb overlay; keep the point cloud as-is
     });
 }
