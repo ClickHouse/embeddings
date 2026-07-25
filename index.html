@@ -890,6 +890,63 @@ async function updateTagCloud() {
         placeTagCloud();                                /// top below the panel; right flush to the (trimmed) report panel
     } catch (e) { if (seq === tagSeq) el.style.display = 'none'; }
 }
+let hnTokenTotal = null;   /// cached total corpus token count (IDF denominator), fetched once
+/// HackerNews analogue of the tag cloud: the most "contrasting" tokens of the current top-K vs the whole
+/// corpus, scored TF-IDF style — tf (occurrences within the top-K comments) x log(T / cf) (corpus rarity).
+async function updateTokenCloud() {
+    const el = document.getElementById('tagcloud');
+    const ids = repMd5s.slice(0, 1000);
+    if (!reportActive || !ids.length) { el.style.display = 'none'; return; }
+    const seq = ++tagSeq;
+    const TOK = `tokens(lowerUTF8(decodeHTMLComponent(extractTextFromHTML(text))))`;
+    const esc1 = s => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    try {
+        if (hnTokenTotal == null) {   /// IDF denominator (deterministic -> cacheable)
+            const t = (await (await fetch(chURL('use_query_cache=1'), { method: 'POST',
+                body: `SELECT sum(cnt) FROM default.hackernews_tokens_stats FORMAT TSV` })).text()).trim();
+            hnTokenTotal = +t || 1e9;
+        }
+        /// term frequency of each token across the top-K comments (>= 3 occurrences)
+        const aSql = `SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${C().emb(dataset)} WHERE ${KEY()} IN (${ids.join(',')}))
+            GROUP BY token HAVING tf >= 3 ORDER BY tf DESC LIMIT 1500 FORMAT JSONCompactEachRow`;
+        const aTxt = await (await fetch(chURL('use_query_cache=0'), { method: 'POST', body: aSql })).text();
+        if (seq !== tagSeq || !reportActive) return;
+        const tf = new Map();
+        for (const l of aTxt.trim().split('\n').filter(Boolean)) { const [tok, n] = JSON.parse(l); tf.set(tok, n); }
+        if (!tf.size) { el.style.display = 'none'; return; }
+        /// corpus frequency of exactly those tokens (PK seek on the token-sorted stats table)
+        const inlist = [...tf.keys()].map(t => `'${esc1(t)}'`).join(',');
+        const bSql = `SELECT token, sum(cnt) AS cf FROM default.hackernews_tokens_stats WHERE token IN (${inlist}) GROUP BY token FORMAT JSONCompactEachRow`;
+        const bTxt = await (await fetch(chURL('use_query_cache=0'), { method: 'POST', body: bSql })).text();
+        if (seq !== tagSeq || !reportActive) return;
+        const cf = new Map();
+        for (const l of bTxt.trim().split('\n').filter(Boolean)) { const [tok, c] = JSON.parse(l); cf.set(tok, c); }
+        /// score = (1 + log tf) * IDF — sublinear tf so high-frequency stopwords don't dominate; cf >= 20 drops
+        /// one-off typos/noise while keeping genuinely rare-but-recurring (i.e. contrasting) terms.
+        const scored = [];
+        for (const [tok, f] of tf) { const c = cf.get(tok); if (!c || c < 20) continue; scored.push([tok, (1 + Math.log(f)) * Math.log(hnTokenTotal / c)]); }
+        if (!scored.length) { el.style.display = 'none'; return; }
+        scored.sort((a, b) => b[1] - a[1]);
+        const top = scored.slice(0, 80);
+        const vals = top.map(t => t[1]), max = Math.max(...vals), min = Math.min(...vals);
+        const smin = Math.sqrt(min), smax = Math.sqrt(max);
+        top.sort((a, b) => a[0].localeCompare(b[0]));   /// alphabetical display; font size still by score
+        el.replaceChildren();
+        for (const [tok, sc] of top) {
+            const f = max > min ? (sc - min) / (max - min) : 1;                    /// colour ramp
+            const fs = smax > smin ? (Math.sqrt(sc) - smin) / (smax - smin) : 1;   /// size ~ sqrt(score)
+            const s = document.createElement('span');
+            s.className = 't'; s.textContent = tok;
+            s.title = `${tf.get(tok)}× in top-K · ${cf.get(tok)}× in corpus`;
+            s.style.fontSize = (11 + fs * 17).toFixed(1) + 'px';
+            s.style.color = f >= 0.5 ? `rgb(255,255,${Math.round(255*(2*f-1))})` : `rgb(255,${Math.round(165+180*f)},0)`;
+            el.appendChild(s);
+        }
+        el.onmouseleave = null;
+        el.style.display = 'block';
+        placeTagCloud();
+    } catch (e) { if (seq === tagSeq) el.style.display = 'none'; }
+}
 /// place the tag cloud under the top panel, its right edge flush to the report panel's actual left edge
 /// (the panel is trimmed to whole thumbnail columns by fitPanelWidth, so its width != the nominal min(40%,640px))
 function placeTagCloud() {
@@ -996,7 +1053,7 @@ async function runSimilar(more) {
             repLoaded = rows.length;
             repMd5s = rows.map(r => r.md5); lastRows = rows.slice();
         }
-        updateTagCloud();                                                  /// refresh the user-tag cloud over the map
+        (isHN() ? updateTokenCloud : updateTagCloud)();                    /// refresh the cloud over the map (HN: contrasting tokens; Photos: user tags)
         repMore = rows.length === cnt && repLoaded < MAX_RESULTS;          /// full batch -> more may exist
         hideError();
         document.getElementById('rc-count').textContent = `Top-${repLoaded} similar`;
