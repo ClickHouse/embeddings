@@ -66,9 +66,6 @@
     #panel b { color: #ff0; }
     .grp { display: flex; gap: .15em; align-items: center; }
     .grp label { color: #999; margin-right: .25em; }
-    #search { background: #222; color: #eee; border: 1px solid #555; border-radius: 3px; padding: 2px 7px; font: 13px sans-serif; width: 11em; outline: none; }
-    #search:focus { border-color: #ff0; }
-    body.search-active .cloud-base { filter: grayscale(1) brightness(0.5); }   /* dim non-matched points while searching */
     .opt { padding: .2em .5em; background: #333; border: 1px solid #000; cursor: pointer; user-select: none; }
     .opt:hover { background: #ff0; color: #000; }
     .opt.sel { background: #fff; color: #000; }
@@ -138,7 +135,6 @@
     <div class="grp"><label>model</label><span id="datasets"></span></div>
     <div class="grp" id="modes-grp"><label>mode</label><span id="modes"></span></div>
     <div class="grp"><label>projection</label><span id="projs"></span></div>
-    <div class="grp"><label>search</label><input id="search" type="search" placeholder="tag or text…" autocomplete="off"></div>
     <span id="hint3d">drag to rotate, right-drag or Ctrl/Cmd+drag to pan</span>
     <span id="status">ready</span>
     <span id="zoom" title="map zoom level"></span>
@@ -320,7 +316,7 @@ function fmtBytes(n) { if (!isFinite(n)) return '—'; const u = ['B', 'KiB', 'M
 /// ---- Point-cloud tile query ----
 /// Table name comes from our own config, so it is interpolated (not a {:Identifier} param,
 /// which would wrap the dotted db.table in backticks as a single identifier).
-function tileSQL(table, q99, match = '') {
+function tileSQL(table, q99) {
     /// Fixed brightness normalization: expected q99 per-pixel density / 4^zoom (each 2x zoom
     /// quarters the per-pixel area). q is a constant per tile -> brightness is consistent across
     /// tiles and zoom levels (adsb-style), instead of a per-tile quantile.
@@ -337,13 +333,13 @@ function tileSQL(table, q99, match = '') {
                    toUInt16(intDiv((${yc} - ty0) * ${TILE}, ts)) AS py,
                    count() AS cnt, avg(${zc}) / 65535 AS hue
             FROM ${table}
-            WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts${match ? ` AND (${match})` : ''}
+            WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
             GROUP BY px, py
         )
     ) FORMAT RowBinary`;
 }
 /// One representative md5 per 75px cell for the thumbnails overlay.
-function thumbCellsSQL(table, match = '') {
+function thumbCellsSQL(table) {
     const CELL = 75; const { xc, yc } = projCfg();
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
@@ -352,13 +348,13 @@ function thumbCellsSQL(table, match = '') {
     FROM (
         SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
         FROM ${table}
-        WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts${match ? ` AND (${match})` : ''}
+        WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
     )
     GROUP BY cx, cy
     FORMAT RowBinary`;
 }
 /// 3D thumbnail cells: one representative md5 per 75px cell of the ROTATED projection (full scan, like tileSQL3d).
-function thumbCellsSQL3d(table, match = '') {
+function thumbCellsSQL3d(table) {
     const CELL = 75, u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
@@ -368,7 +364,7 @@ function thumbCellsSQL3d(table, match = '') {
     SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
     FROM (
         SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
-        FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM ${table}${match ? ` WHERE (${match})` : ''})
+        FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM ${table})
         WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
     )
     GROUP BY cx, cy
@@ -378,7 +374,7 @@ function thumbCellsSQL3d(table, match = '') {
 /// ---- Rendering ----
 /// UMAP 3D: orthographic projection of the rotated 3D cloud into the 2^32 square, aggregated per tile pixel.
 /// Projection depends on rotation -> no morton index -> full scan (~1s). rx,ry = rows 0,1 of the view matrix R.
-function tileSQL3d(table, q99, match = '') {
+function tileSQL3d(table, q99) {
     const u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`;   /// screen x = row 0 of R · (nx,ny,nz)
@@ -394,7 +390,7 @@ function tileSQL3d(table, q99, match = '') {
         FROM (
             SELECT toUInt16(intDiv((PX - tx0) * ${TILE}, ts)) AS px,
                    toUInt16(intDiv((PY - ty0) * ${TILE}, ts)) AS py, count() AS cnt, avg(hue) AS hue
-            FROM (SELECT ${PX} AS PX, ${PY} AS PY, ${hue} AS hue FROM ${table}${match ? ` WHERE (${match})` : ''})
+            FROM (SELECT ${PX} AS PX, ${PY} AS PY, ${hue} AS hue FROM ${table})
             WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
             GROUP BY px, py
         )
@@ -412,16 +408,15 @@ const CANVAS_CS = (() => {
 /// never re-renders (or re-queries) it — see applyMode. Projection / 3D-rotation changes DO
 /// re-render it (the tile coordinates genuinely change) via redraw(). Thumbs mode dims it via
 /// the layer's opacity, not by re-fetching darker pixels.
-async function renderTile(coords, canvas, match = '') {
+async function renderTile(coords, canvas) {
     const cfg = projCfg(), table = cfg.table, q99 = cfg.q99;
     const p = { z: coords.z, x: coords.x, y: coords.y };
-    if (match) p.q = searchLike();
     const ctx = canvas.getContext('2d', { colorSpace: CANVAS_CS });
     const seq = canvas._rseq = (canvas._rseq || 0) + 1;   /// discard a stale render if a newer one for this tile started
     try {
         let sql;
-        if (cfg.three) { Object.assign(p, rotParams()); sql = tileSQL3d(table, q99, match); }   /// UMAP 3D: rotated projection
-        else sql = tileSQL(table, q99, match);
+        if (cfg.three) { Object.assign(p, rotParams()); sql = tileSQL3d(table, q99); }   /// UMAP 3D: rotated projection
+        else sql = tileSQL(table, q99);
         const buf = await (await chQuery(sql, p)).arrayBuffer();
         if (canvas._rseq !== seq) return;                 /// superseded -> keep the current image (no blank / no stale overwrite)
         const dv = new DataView(buf);
@@ -443,7 +438,6 @@ async function renderThumbTile(coords, canvas) {
     const { table } = projCfg();
     const p = { z: coords.z, x: coords.x, y: coords.y };
     const ctx = canvas.getContext('2d');
-    const ks = searchQ ? matchKeys() : null;   /// search + thumbs: draw only matched thumbnails (client-side, from the fetched key set)
     try {
         let sql = thumbCellsSQL(table);
         if (is3D()) { Object.assign(p, rotParams()); sql = thumbCellsSQL3d(table); }
@@ -453,7 +447,6 @@ async function renderThumbTile(coords, canvas) {
             const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
             const len = cells[o++];               /// md5 <= 127 bytes -> single varint byte
             const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
-            if (ks && !ks.has(md5)) continue;     /// hide non-matched thumbnails while searching
             cellMap[px + ',' + py] = md5;
             drawThumb(ctx, px, py, md5);
         }
@@ -504,103 +497,9 @@ map.fitBounds(worldBounds);
 /// and the thumbnail overlay (present only in 2D thumbs mode) on top. A GridLayer subclass
 /// parameterized by its per-tile renderer builds both.
 let pointLayer = null, thumbLayer = null;
-/// ---- Search filter -----------------------------------------------------------------------------------------
-/// A search term dims the whole point cloud (grayscale + half brightness, via CSS on the base tiles) and draws
-/// the MATCHED points on top in full colour; in thumbs mode only matched thumbnails are shown. It never touches
-/// the top-K report. Photos match image tags; HackerNews matches full comment text. Arbitrary substring search
-/// is a ~5-6 s scan (skip indexes don't help common terms), so we scan ONCE per search — fetch the matched
-/// points' coords+colour+key (capped) — then render/reproject them client-side (instant on pan/zoom/rotate).
-const SEARCH_CAP = 300000, MATCH_ALPHA = 0.7;
-let searchQ = '', matchData = null, matchSeq = 0, matchRAF = null;
-const matchKeys = () => (matchData && matchData.keys) || null;
-function matchWhere() {   /// key predicate ({q:String} = '%term%') used as the WHERE of the one-shot fetch
-    return corpus === 'photos'
-        ? `${KEY()} IN (SELECT md5 FROM mmcommons.tags_by_md5 WHERE lowerUTF8(arrayStringConcat(user_tags, ' ')) LIKE {q:String})`
-        : `${KEY()} IN (SELECT id FROM default.hackernews WHERE lowerUTF8(text) LIKE {q:String})`;
-}
-const searchLike = () => '%' + searchQ.toLowerCase().replace(/[\\%_]/g, '\\$&') + '%';   /// escape LIKE metachars
-const matchCanvas = L.DomUtil.create('canvas', 'match-canvas', map.getContainer());
-Object.assign(matchCanvas.style, { position: 'absolute', left: '0', top: '0', zIndex: 500, pointerEvents: 'none', display: 'none' });
-const matchCtx = matchCanvas.getContext('2d', { colorSpace: CANVAS_CS });
-function parseMatch(buf, three) {   /// RowBinary -> normalized coords + per-point colour + key set
-    const dv = new DataView(buf), bytes = new Uint8Array(buf), td = new TextDecoder();
-    const u = C().u3d[dataset], crange = three ? (u.chi - u.clo) : 1;
-    const ax = [], ay = [], az = [], cr = [], cg = [], cb = [], keys = new Set();
-    let o = 0;
-    while (o < buf.byteLength) {
-        let hue;
-        if (three) {   /// x,y,z,color Float32
-            const x = dv.getFloat32(o, true), y = dv.getFloat32(o+4, true), z = dv.getFloat32(o+8, true), c = dv.getFloat32(o+12, true); o += 16;
-            ax.push((x - u.cx) / u.s); ay.push((y - u.cy) / u.s); az.push((z - u.cz) / u.s);
-            hue = Math.max(0, Math.min(1, (c - u.clo) / crange));
-        } else {   /// mx,my UInt32 + mz UInt16 (mapped coords; z/mz = colour)
-            const mx = dv.getUint32(o, true), my = dv.getUint32(o+4, true), mz = dv.getUint16(o+8, true); o += 10;
-            ax.push(mx / 4294967296); ay.push(my / 4294967296); az.push(0);
-            hue = mz / 65535;
-        }
-        const rgb = oklchToRGB(0.75, 0.16, hue * 360);
-        cr.push(rgb[0] * MATCH_ALPHA); cg.push(rgb[1] * MATCH_ALPHA); cb.push(rgb[2] * MATCH_ALPHA);
-        if (o >= bytes.length) break;
-        const len = bytes[o++]; if (o + len > bytes.length) break;
-        keys.add(td.decode(bytes.subarray(o, o + len))); o += len;
-    }
-    return { n: ax.length, ax: Float32Array.from(ax), ay: Float32Array.from(ay), az: Float32Array.from(az),
-        cr: Uint8Array.from(cr), cg: Uint8Array.from(cg), cb: Uint8Array.from(cb), keys, is3d: three, capped: ax.length >= SEARCH_CAP };
-}
-async function fetchMatch() {   /// one scan per search: pull the matched points (capped) for the current projection
-    const seq = ++matchSeq, three = is3D();
-    setStatus('searching…');
-    const table = three ? C().u3(dataset) : (proj === 'UMAP' ? C().u2(dataset) : C().emb(dataset));
-    const cols = three ? 'x, y, z, color' : (proj === 'UMAP' ? 'mx, my, mz' : 'x, y, z');
-    const sql = `SELECT ${cols}, toString(${KEY()}) FROM ${table} WHERE ${matchWhere()} LIMIT {cap:UInt32} FORMAT RowBinary`;
-    try {
-        const buf = await (await fetch(chURL(`enable_parallel_replicas=1&param_q=${encodeURIComponent(searchLike())}&param_cap=${SEARCH_CAP}`), { method: 'POST', body: sql })).arrayBuffer();
-        if (seq !== matchSeq) return;   /// superseded by a newer search / projection change
-        matchData = parseMatch(buf, three);
-        setStatus(`${matchData.n}${matchData.capped ? '+' : ''} matches`);
-        drawMatch();
-        if (thumbLayer && map.hasLayer(thumbLayer)) thumbLayer.redraw();   /// thumbs: re-filter to matched
-    } catch (e) { if (seq === matchSeq) { matchData = null; drawMatch(); showError(String(e).slice(0, 300)); } }
-}
-function drawMatch() {   /// project the fetched matched points into the current view (2D transform or 3D rotation)
-    const hidden = !searchQ || !matchData || !matchData.n || (mode === 'thumbs' && !reportActive);   /// thumbs mode shows matched THUMBS, not the point overlay
-    if (hidden) { matchCanvas.style.display = 'none'; return; }
-    const cont = map.getContainer(), W = cont.clientWidth, H = cont.clientHeight;
-    if (matchCanvas.width !== W) matchCanvas.width = W;
-    if (matchCanvas.height !== H) matchCanvas.height = H;
-    const img = matchCtx.createImageData(W, H, { colorSpace: CANVAS_CS }), data = img.data;
-    const { n, ax, ay, az, cr, cg, cb } = matchData;
-    let SX, OX, SY, OY, r0, r1, r2, r3, r4, r5;
-    if (matchData.is3d) { const t = previewTransform(); SX=t.SX; OX=t.OX; SY=t.SY; OY=t.OY;
-        r0=R[0][0]; r1=R[0][1]; r2=R[0][2]; r3=R[1][0]; r4=R[1][1]; r5=R[1][2]; }
-    else { const D = 4294967296, P0 = map.latLngToContainerPoint(dataToLatLng(0,0)), P1 = map.latLngToContainerPoint(dataToLatLng(D,D));
-        SX = P1.x - P0.x; OX = P0.x; SY = P1.y - P0.y; OY = P0.y; }
-    for (let i = 0; i < n; i++) {
-        let px, py;
-        if (matchData.is3d) { px = (SX*(r0*ax[i]+r1*ay[i]+r2*az[i]) + OX) | 0; py = (SY*(r3*ax[i]+r4*ay[i]+r5*az[i]) + OY) | 0; }
-        else { px = (OX + SX*ax[i]) | 0; py = (OY + SY*ay[i]) | 0; }
-        if (px < 0 || py < 0 || px >= W || py >= H) continue;
-        const j = (py*W+px)*4;   /// additive (denser -> brighter), opaque where matched so the dimmed base shows only elsewhere
-        data[j] = Math.min(255, data[j] + cr[i]); data[j+1] = Math.min(255, data[j+1] + cg[i]); data[j+2] = Math.min(255, data[j+2] + cb[i]); data[j+3] = 255;
-    }
-    matchCtx.putImageData(img, 0, 0); matchCanvas.style.display = 'block';
-}
-function requestMatchDraw() { if (matchRAF) return; matchRAF = requestAnimationFrame(() => { matchRAF = null; drawMatch(); }); }
-function applySearch() {
-    document.body.classList.toggle('search-active', !!searchQ);   /// CSS dims the base cloud (.cloud-base tiles)
-    if (searchQ) fetchMatch();
-    else { matchData = null; matchCanvas.style.display = 'none'; setStatus('ready'); if (thumbLayer && map.hasLayer(thumbLayer)) thumbLayer.redraw(); }
-}
-let searchTimer = null;
-document.getElementById('search').addEventListener('input', function () {
-    const v = this.value.trim();
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { if (v !== searchQ) { searchQ = v; applySearch(); } }, 300);
-});
-map.on('move zoom', () => { if (searchQ && matchData) requestMatchDraw(); });   /// reproject the matched overlay on pan/zoom
-function makeGrid(render, zIndex, className) {
+function makeGrid(render, zIndex) {
     const Grid = L.GridLayer.extend({ createTile: function(coords, done) {
-        const c = L.DomUtil.create('canvas', 'leaflet-tile' + (className ? ' ' + className : ''));
+        const c = L.DomUtil.create('canvas', 'leaflet-tile');
         c.width = TILE; c.height = TILE;
         const n = Math.pow(2, coords.z);   /// valid tile coords: 0 <= x,y < 2^z
         if (coords.x < 0 || coords.y < 0 || coords.x >= n || coords.y >= n) {
@@ -616,11 +515,10 @@ function makeGrid(render, zIndex, className) {
 function makeLayer() {
     if (pointLayer) map.removeLayer(pointLayer);
     if (thumbLayer) map.removeLayer(thumbLayer);
-    pointLayer = makeGrid(renderTile, 1, 'cloud-base');
+    pointLayer = makeGrid(renderTile, 1);
     thumbLayer = makeGrid(renderThumbTile, 2);
     pointLayer.addTo(map);
-    applyMode();       /// thumb overlay + dim the cloud in 2D thumbs mode
-    applySearch();     /// re-apply the search filter (dim base + re-fetch matched overlay) for the new corpus/model
+    applyMode();   /// add the thumb overlay + dim the point cloud if the current mode is 2D thumbs
 }
 /// Switch points<->thumbs WITHOUT re-rendering the point cloud: it stays put in both directions
 /// (only its opacity changes) and we just add/remove the thumbnail overlay on top. Thumbs are
@@ -1390,7 +1288,6 @@ function buildProjSwitch() {
         proj = k;
         set3DMode(is3D());
         hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
-        if (searchQ) fetchMatch();                           /// matched-overlay coords are per-projection -> re-fetch
         /// re-place the top-K overlay for the new projection (incl. 3D) and fit to it; else reset to the full view
         if (reportActive) { armFit(); clearOverlay(); addOverlayThumbs(lastRows).then(() => { if (!mapTouchedSinceSwitch) fitToOverlay(); }); }
         else resetView();
@@ -1526,7 +1423,6 @@ async function endRotate(cx, cy, evForClick) {
     if (len < 1) { hideRotPreview(); return; }   /// dragged but ended back at the start -> no net rotation (and not a click)
     R = matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);  /// pre-multiply: rotate in view space (angle slows with zoom)
     if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
-    if (searchQ) drawMatch();                                      /// re-project the matched overlay to the new orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
     const done = redraw(); updateURL();                            /// NOT drawPreview(cx,cy), which would re-apply the drag)
     try { await done; } catch (e) {}
