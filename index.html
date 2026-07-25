@@ -373,40 +373,39 @@ function thumbCellsSQL3d(table) {
 /// ---- HackerNews "words" mode: a contrasting-word cloud (analogue of Photos "thumbs"). One representative word
 /// per grid cell = the most frequent of the per-comment top contrasting words (precomputed in
 /// hackernews_topwords, looked up per record via the hackernews_topwords_dict dictionary — no per-tile scan).
-/// non-square cells: wide enough for a word, but short so rows pack densely (text is wide, not tall)
+/// non-square grid: wide enough for a word, but short so rows pack densely (text is wide, not tall)
 const WORDCELL_W = 96, WORDCELL_H = 38;
-function wordCellsSQL(table) {
-    const CW = WORDCELL_W, CH = WORDCELL_H; const { xc, yc } = projCfg();
-    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
-        greatest(intDiv(ts * ${CW}, ${TILE}), 1) AS cellw, greatest(intDiv(ts * ${CH}, ${TILE}), 1) AS cellh
-    SELECT (cx * ${CW})::UInt16 AS px, (cy * ${CH})::UInt16 AS py, topK(1)(word)[1] AS word
-    FROM (
-        SELECT intDiv(${xc} - tx0, cellw) AS cx, intDiv(${yc} - ty0, cellh) AS cy,
-               arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', ${KEY()})) AS word
-        FROM ${table}
-        WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
-    )
-    GROUP BY cx, cy
-    FORMAT RowBinary`;
+let wordCanvas = null, wordCtx = null, wordSeq = 0;   /// single viewport overlay canvas (created after the map)
+/// Stopwords + single-letter tokens removed from every word display (word cloud, top-K token cloud, hover tags).
+/// Applied inline in SQL (no table needed) since the precomputed top words are IDF-ranked and rarely include them.
+const STOPWORDS = ('a about above after again against all am an and any are as at be because been before being below between both but by can could did do does doing down during each few for from further had has have having he her here hers herself him himself his how i if in into is it its itself just me more most my myself no nor not now of off on once only or other ours ourselves out over own same she should so some such than that the their theirs them themselves then there these they this those through to too under until up very was we were what when where which while who whom why will with would you your yours yourself yourselves re ve ll nt don dont cant im youre thats get got like one also http https www com edu org').split(' ');
+const STOP_SQL = STOPWORDS.map(w => `'${w}'`).join(',');
+const notStop = col => `length(${col}) >= 2 AND ${col} NOT IN (${STOP_SQL})`;   /// SQL predicate: drop single-letter + stopwords
+/// Aggregate one representative word per grid cell over the CURRENT VIEWPORT bbox (NOT per Leaflet tile — so a
+/// word is never cut at a tile seam; it renders once on a single canvas). {x0,y0} = viewport origin (data
+/// coords), {cw,ch} = cell size (data units). Returns cx,cy (grid indices) + record count (for font sizing) +
+/// the cell's most frequent contrasting word (for client-side dedup: merge adjacent same-word cells).
+function wordViewSQL(xc, yc, table) {
+    return `SELECT cx::UInt16 AS cx, cy::UInt16 AS cy, count()::UInt32 AS cnt, topK(1)(w)[1] AS word
+    FROM (SELECT intDiv(${xc} - {x0:UInt32}, {cw:UInt32}) AS cx, intDiv(${yc} - {y0:UInt32}, {ch:UInt32}) AS cy,
+                 arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', ${KEY()})) AS w
+          FROM ${table}
+          WHERE ${xc} BETWEEN {x0:UInt32} AND {x1:UInt32} AND ${yc} BETWEEN {y0:UInt32} AND {y1:UInt32})
+    WHERE ${notStop('w')}
+    GROUP BY cx, cy FORMAT RowBinary`;
 }
-function wordCellsSQL3d(table) {
-    const CW = WORDCELL_W, CH = WORDCELL_H, u = C().u3d[dataset];
+function wordViewSQL3d(table) {
+    const u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
     const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`, PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
-    return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
-        greatest(intDiv(ts * ${CW}, ${TILE}), 1) AS cellw, greatest(intDiv(ts * ${CH}, ${TILE}), 1) AS cellh
-    SELECT (cx * ${CW})::UInt16 AS px, (cy * ${CH})::UInt16 AS py, topK(1)(word)[1] AS word
-    FROM (
-        SELECT intDiv(PX - tx0, cellw) AS cx, intDiv(PY - ty0, cellh) AS cy,
-               arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', id)) AS word
-        FROM (SELECT ${KEY()} AS id, ${PX} AS PX, ${PY} AS PY FROM ${table})
-        WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
-    )
-    GROUP BY cx, cy
-    FORMAT RowBinary`;
+    return `SELECT cx::UInt16 AS cx, cy::UInt16 AS cy, count()::UInt32 AS cnt, topK(1)(w)[1] AS word
+    FROM (SELECT intDiv(PX - {x0:UInt32}, {cw:UInt32}) AS cx, intDiv(PY - {y0:UInt32}, {ch:UInt32}) AS cy,
+                 arrayJoin(dictGet('default.hackernews_topwords_dict', 'words', id)) AS w
+          FROM (SELECT ${KEY()} AS id, ${PX} AS PX, ${PY} AS PY FROM ${table})
+          WHERE PX BETWEEN {x0:UInt32} AND {x1:UInt32} AND PY BETWEEN {y0:UInt32} AND {y1:UInt32})
+    WHERE ${notStop('w')}
+    GROUP BY cx, cy FORMAT RowBinary`;
 }
 
 /// ---- Rendering ----
@@ -497,27 +496,58 @@ function drawThumb(ctx, px, py, md5) {
     im.onload = () => ctx.drawImage(im, px, py, 75, 75);
     im.src = thumbURL(md5);
 }
-/// HackerNews "words" tile: draw one contrasting word per grid cell as centred text (a map word cloud).
-async function renderWordTile(coords, canvas) {
-    const { table } = projCfg();
-    const p = { z: coords.z, x: coords.x, y: coords.y };
-    const ctx = canvas.getContext('2d');
+/// HackerNews "words" word cloud: query one word per grid cell over the whole VIEWPORT, then dedup —
+/// merge adjacent (8-connected) cells sharing the same word into one label at their weighted centroid, with a
+/// font that grows with the number of merged cells. Drawn on a single overlay canvas so words are never cut.
+async function drawWords() {
+    if (!wordCanvas || !(mode === 'words' && !reportActive)) { if (wordCanvas) wordCanvas.style.display = 'none'; return; }
+    const seq = ++wordSeq, cont = map.getContainer(), W = cont.clientWidth, H = cont.clientHeight;
+    if (wordCanvas.width !== W) wordCanvas.width = W;
+    if (wordCanvas.height !== H) wordCanvas.height = H;
+    const a = latlngToData(map.containerPointToLatLng([0, 0])), b = latlngToData(map.containerPointToLatLng([W, H]));
+    const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+    const dpp = Math.pow(2, COORD_BITS - map.getZoom()) / TILE;   /// data units per screen pixel
+    const cw = Math.max(1, Math.round(WORDCELL_W * dpp)), ch = Math.max(1, Math.round(WORDCELL_H * dpp));
+    const cfg = projCfg(), p = { x0, x1, y0, y1, cw, ch };   /// x0..y1 already integer + clamped to [0,2^32) by latlngToData
+    const sql = cfg.three ? (Object.assign(p, rotParams()), wordViewSQL3d(cfg.table)) : wordViewSQL(cfg.xc, cfg.yc, cfg.table);
     try {
-        let sql = wordCellsSQL(table);
-        if (is3D()) { Object.assign(p, rotParams()); sql = wordCellsSQL3d(table); }
-        /// dictGet is "non-deterministic" to the query cache; the dict is static (LIFETIME 0) so caching is safe
-        const cells = new Uint8Array(await (await chQuery(sql, p, 'RowBinary', 'query_cache_nondeterministic_function_handling=save')).arrayBuffer());
-        ctx.clearRect(0, 0, TILE, TILE);
-        ctx.font = '600 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
-        const td = new TextDecoder(); let o = 0;
-        while (o + 4 < cells.length) {
-            const px = cells[o] | (cells[o+1] << 8), py = cells[o+2] | (cells[o+3] << 8); o += 4;
-            const len = cells[o++]; const word = td.decode(cells.subarray(o, o + len)); o += len;
-            ctx.fillText(word, px + WORDCELL_W / 2, py + WORDCELL_H / 2);   /// centre the word in its cell
+        const buf = new Uint8Array(await (await chQuery(sql, p, 'RowBinary', 'query_cache_nondeterministic_function_handling=save')).arrayBuffer());
+        if (seq !== wordSeq) return;
+        const dv = new DataView(buf.buffer), td = new TextDecoder(), cells = new Map();
+        let o = 0;
+        while (o + 8 <= buf.length) {
+            const cx = dv.getUint16(o, true), cy = dv.getUint16(o + 2, true), cnt = dv.getUint32(o + 4, true); o += 8;
+            const len = buf[o++]; const word = td.decode(buf.subarray(o, o + len)); o += len;
+            cells.set(cx + ',' + cy, { cx, cy, cnt, word });
         }
+        const seen = new Set(), labels = [];   /// connected-components dedup (per word, 8-adjacency)
+        for (const [k, c] of cells) {
+            if (seen.has(k)) continue;
+            seen.add(k); const comp = [c], st = [c];
+            while (st.length) { const cur = st.pop();
+                for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+                    if (!dx && !dy) continue;
+                    const nk = (cur.cx + dx) + ',' + (cur.cy + dy), nc = cells.get(nk);
+                    if (nc && !seen.has(nk) && nc.word === c.word) { seen.add(nk); comp.push(nc); st.push(nc); }
+                } }
+            let sw = 0, mx = 0, my = 0;
+            for (const q of comp) { sw += q.cnt; mx += (q.cx + 0.5) * q.cnt; my += (q.cy + 0.5) * q.cnt; }
+            labels.push({ word: c.word, cx: mx / sw, cy: my / sw, n: comp.length });
+        }
+        const ctx = wordCtx;
+        ctx.clearRect(0, 0, W, H);
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+        ctx.shadowColor = '#000'; ctx.shadowBlur = 3;
+        labels.sort((u, v) => u.n - v.n);   /// draw the big (merged) labels last, on top
+        for (const L of labels) {
+            const sp = map.latLngToContainerPoint(dataToLatLng(x0 + L.cx * cw, y0 + L.cy * ch));
+            if (sp.x < -40 || sp.y < -20 || sp.x > W + 40 || sp.y > H + 20) continue;
+            ctx.font = `600 ${Math.min(30, 11 + 4 * Math.log2(1 + L.n)).toFixed(1)}px sans-serif`;   /// larger when more merged
+            ctx.fillText(L.word, sp.x, sp.y);
+        }
+        wordCanvas.style.display = 'block';
         hideError();
-    } catch (e) { showError(String(e).slice(0, 500)); }
+    } catch (e) { if (seq === wordSeq) showError(String(e).slice(0, 400)); }
 }
 /// The md5 of the thumbnail DRAWN at data-coord d (thumbs mode) — read straight from the rendered tiles'
 /// stored cell maps, so a click needs no query and hits exactly the displayed image (works in 2D and 3D).
@@ -553,6 +583,11 @@ map.attributionControl.setPrefix(false).addAttribution(
 const worldBounds = L.latLngBounds(map.unproject([0, TILE], 0), map.unproject([TILE, 0], 0));
 map.setMaxBounds(worldBounds.pad(0.3));
 map.fitBounds(worldBounds);
+/// Single overlay canvas for the HackerNews "words" cloud (above the dimmed point cloud, below markers). One
+/// canvas for the whole viewport (not per Leaflet tile) so words are never cut at a tile seam.
+wordCanvas = L.DomUtil.create('canvas', 'word-canvas', map.getContainer());
+Object.assign(wordCanvas.style, { position: 'absolute', left: '0', top: '0', zIndex: 450, pointerEvents: 'none', display: 'none' });
+wordCtx = wordCanvas.getContext('2d');
 /// Two stacked tile layers: the point cloud (persistent, shared by both modes) sits underneath,
 /// and the thumbnail overlay (present only in 2D thumbs mode) on top. A GridLayer subclass
 /// parameterized by its per-tile renderer builds both.
@@ -576,7 +611,7 @@ function makeLayer() {
     if (pointLayer) map.removeLayer(pointLayer);
     if (thumbLayer) map.removeLayer(thumbLayer);
     pointLayer = makeGrid(renderTile, 1);
-    thumbLayer = makeGrid(isHN() ? renderWordTile : renderThumbTile, 2);   /// HN overlay = contrasting-word cloud; Photos = thumbnails
+    thumbLayer = makeGrid(renderThumbTile, 2);   /// Photos thumbnail overlay (HN "words" uses the single wordCanvas, not a tile layer)
     pointLayer.addTo(map);
     applyMode();   /// add the thumb overlay + dim the point cloud if the current mode is 2D thumbs
 }
@@ -585,10 +620,12 @@ function makeLayer() {
 /// hidden in a report (point cloud shown full-brightness under the top-K overlay) and in UMAP 3D.
 function applyMode() {
     if (!pointLayer) return;
-    const showOverlay = mode !== 'points' && !reportActive;   /// thumbs (Photos) / words (HN) overlay; dims the cloud beneath
-    pointLayer.setOpacity(showOverlay ? 0.5 : 1);
-    if (showOverlay) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
+    const showThumbs = mode === 'thumbs' && !reportActive;   /// Photos thumbnail tile overlay
+    const showWords = mode === 'words' && !reportActive;     /// HackerNews word cloud (single canvas)
+    pointLayer.setOpacity((showThumbs || showWords) ? 0.5 : 1);
+    if (showThumbs) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
     else if (map.hasLayer(thumbLayer)) map.removeLayer(thumbLayer);
+    if (showWords) drawWords(); else if (wordCanvas) wordCanvas.style.display = 'none';
 }
 /// Re-render the point cloud for projection / 3D-rotation changes (tile coordinates genuinely change),
 /// NOT for points<->thumbs (see applyMode). The point-cloud tiles are re-rendered IN PLACE — each keeps
@@ -769,7 +806,7 @@ function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 
 async function showTagHover(id, cp, seq) {
     const TOK = `tokens(lowerUTF8(decodeHTMLComponent(extractTextFromHTML(text))))`, T = hnTokenTotal || 2.36e9;
     const sql = `SELECT t.token FROM
-        (SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${C().emb(dataset)} WHERE ${KEY()}={k:${C().keyType}}) GROUP BY token) AS t
+        (SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${C().emb(dataset)} WHERE ${KEY()}={k:${C().keyType}}) WHERE ${notStop('token')} GROUP BY token) AS t
         INNER JOIN (SELECT token, sum(cnt) AS cf FROM default.hackernews_tokens_stats
                     WHERE token IN (SELECT arrayJoin(${TOK}) FROM ${C().emb(dataset)} WHERE ${KEY()}={k:${C().keyType}}) GROUP BY token HAVING cf >= 20) AS s USING (token)
         ORDER BY (1 + log(t.tf)) * log(${T} / s.cf) DESC LIMIT 3 FORMAT TSV`;
@@ -795,7 +832,8 @@ map.on('mousemove', (e) => {
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
 map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear thumbs/comment preview (tag box cleared by hideHover)
-map.on('movestart zoomstart', () => { hideHover(); hidePreview(); });           /// pan/zoom: clear any preview
+map.on('movestart zoomstart', () => { hideHover(); hidePreview(); if (mode === 'words' && wordCanvas) wordCanvas.style.display = 'none'; });   /// pan/zoom: clear previews + the (now-misaligned) word cloud
+map.on('moveend zoomend', () => { if (mode === 'words' && !reportActive) drawWords(); });   /// re-render the word cloud for the new viewport
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
 function nearest3dMd5(cp) {
@@ -994,8 +1032,9 @@ async function updateTokenCloud() {
                 body: `SELECT sum(cnt) FROM default.hackernews_tokens_stats FORMAT TSV` })).text()).trim();
             hnTokenTotal = +t || 1e9;
         }
-        /// term frequency of each token across the top-K comments (>= 3 occurrences)
+        /// term frequency of each token across the top-K comments (>= 3 occurrences), excluding single-letter tokens + stopwords
         const aSql = `SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${C().emb(dataset)} WHERE ${KEY()} IN (${ids.join(',')}))
+            WHERE ${notStop('token')}
             GROUP BY token HAVING tf >= 3 ORDER BY tf DESC LIMIT 1500 FORMAT JSONCompactEachRow`;
         const aTxt = await (await fetch(chURL('use_query_cache=0'), { method: 'POST', body: aSql })).text();
         if (seq !== tagSeq || !reportActive) return;
@@ -1483,6 +1522,7 @@ async function endRotate(cx, cy, evForClick) {
     if (len < 1) { hideRotPreview(); return; }   /// dragged but ended back at the start -> no net rotation (and not a click)
     R = matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);  /// pre-multiply: rotate in view space (angle slows with zoom)
     if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
+    if (mode === 'words') drawWords();                             /// re-project the word cloud to the new 3D orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
     const done = redraw(); updateURL();                            /// NOT drawPreview(cx,cy), which would re-apply the drag)
     try { await done; } catch (e) {}
