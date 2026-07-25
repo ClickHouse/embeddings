@@ -263,6 +263,9 @@ const C = () => CORPORA[corpus];        /// current corpus config
 const curModel = () => C().models[dataset];
 const KEY = () => C().key;              /// key column name in SQL ('md5' | 'id')
 const isHN = () => corpus === 'hn';
+/// Canonical HN items table (id-keyed) — single source of comment author/text/time. Most per-model embedding
+/// tables carry these inline, but some (e.g. bow) don't, so ALL HN metadata reads go here (id PK-seek).
+const HN_ITEMS = 'default.hackernews';
 let curReport = null;                                       /// key (md5 | id) of the open report
 let repSeq = 0;                                             /// guards a slow query from clobbering a newer switch
 let repAbort = null;                                        /// aborts a still-running scan when switching
@@ -853,9 +856,9 @@ function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 
 async function showTagHover(id, cp, seq) {
     const TOK = `tokens(lowerUTF8(decodeHTMLComponent(extractTextFromHTML(text))))`, T = hnTokenTotal || 2.36e9;
     const sql = `SELECT t.token FROM
-        (SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${C().emb(dataset)} WHERE ${KEY()}={k:${C().keyType}}) WHERE ${notStop('token')} GROUP BY token) AS t
+        (SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${HN_ITEMS} WHERE ${KEY()}={k:${C().keyType}}) WHERE ${notStop('token')} GROUP BY token) AS t
         INNER JOIN (SELECT token, sum(cnt) AS cf FROM default.hackernews_tokens_stats
-                    WHERE token IN (SELECT arrayJoin(${TOK}) FROM ${C().emb(dataset)} WHERE ${KEY()}={k:${C().keyType}}) GROUP BY token HAVING cf >= 20) AS s USING (token)
+                    WHERE token IN (SELECT arrayJoin(${TOK}) FROM ${HN_ITEMS} WHERE ${KEY()}={k:${C().keyType}}) GROUP BY token HAVING cf >= 20) AS s USING (token)
         ORDER BY (1 + log(t.tf)) * log(${T} / s.cf) DESC LIMIT 3 FORMAT TSV`;
     try {
         const url = chURL(`use_query_cache=0&param_k=${encodeURIComponent(id)}`, USER_THUMBS);
@@ -1080,7 +1083,7 @@ async function updateTokenCloud() {
             hnTokenTotal = +t || 1e9;
         }
         /// term frequency of each token across the top-K comments (>= 3 occurrences), excluding single-letter tokens + stopwords
-        const aSql = `SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${C().emb(dataset)} WHERE ${KEY()} IN (${ids.join(',')}))
+        const aSql = `SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${HN_ITEMS} WHERE ${KEY()} IN (${ids.join(',')}))
             WHERE ${notStop('token')}
             GROUP BY token HAVING tf >= 3 ORDER BY tf DESC LIMIT 1500 FORMAT JSONCompactEachRow`;
         const aTxt = await (await fetch(chURL('use_query_cache=0'), { method: 'POST', body: aSql })).text();
@@ -1146,6 +1149,21 @@ function highlightTags(md5) {
 function clearTagHl() {
     document.querySelectorAll('#tagcloud .t.hl').forEach(s => s.classList.remove('hl'));
 }
+/// Fill in author/text/date for a page of ranked HN result ids from the canonical items table (PK-seek by id).
+/// The per-model embedding tables usually carry these inline, but some don't (e.g. bow: id+embedding+coords only),
+/// so we always source comment metadata here. Rows without a match keep their fallbacks.
+async function attachHNMeta(rows) {
+    const ids = rows.map(r => String(r.md5)).filter(s => /^\d+$/.test(s)).join(',');   /// numeric ids, unquoted -> PK seek
+    if (!ids) return;
+    const sql = `SELECT toString(id) AS md5, "by" AS by, substringUTF8(text, 1, 1000) AS text, formatDateTime(time, '%Y-%m-%d') AS ts
+        FROM ${HN_ITEMS} WHERE id IN (${ids}) LIMIT 1 BY id FORMAT JSONEachRow`;
+    try {
+        const txt = (await (await chQuery(sql, {}, 'JSONEachRow')).text()).trim();
+        const meta = new Map();
+        for (const line of txt.split('\n')) { if (!line) continue; const o = JSON.parse(line); meta.set(o.md5, o); }
+        for (const r of rows) { const m = meta.get(String(r.md5)); if (m) { r.by = m.by; r.text = m.text; r.ts = m.ts; } }
+    } catch (e) { /* leave rows without meta -> cards render fallbacks */ }
+}
 /// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
 async function runSimilar(more) {
     const table = C().emb(dataset), col = qbitInfo().col, md5 = curReport;   /// SEARCH always on emb (umap has no embeddings)
@@ -1171,10 +1189,10 @@ async function runSimilar(more) {
         const total = await tableRows(table);               /// bar denominator (progress.total_rows_to_read is unreliable w/ parallel replicas)
         if (seq !== repSeq) return;
         /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
-        /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return the id + comment
-        /// fields so the report cards render with no extra lookup (the emb table carries author/text/time inline).
+        /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return id + x,y and then
+        /// fetch author/text/date for the ranked ids from default.hackernews (uniform across models incl. bow).
         const sel = isHN()
-            ? `toString(${KEY()}) AS md5, x, y, "by", substringUTF8(text, 1, 1000) AS text, formatDateTime(time, '%Y-%m-%d') AS ts`
+            ? `toString(${KEY()}) AS md5, x, y`   /// author/text/date fetched from default.hackernews after ranking (works for models w/o inline meta, e.g. bow)
             : `md5, x, y`;
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
             SELECT ${sel} FROM ${table}
@@ -1212,6 +1230,7 @@ async function runSimilar(more) {
         }
         if (seq !== repSeq) return;                          /// a newer switch superseded this run (it owns repLoading)
         bar.style.display = 'none';
+        if (isHN() && rows.length) { await attachHNMeta(rows); if (seq !== repSeq) return; }   /// fill by/text/ts from default.hackernews
         if (more) {
             for (const r of rows) grid.appendChild(resultNode(r));   /// append the next page (keeps scroll position)
             addOverlayThumbs(rows);                                           /// and place them on the map
@@ -1302,7 +1321,7 @@ async function previewComment(id) {
     const cm = document.getElementById('full-comment'); cm.style.display = 'block';
     cm.innerHTML = '<div class="hnmeta">loading…</div>';
     document.getElementById('full').style.display = 'block';
-    const sql = `SELECT "by", formatDateTime(time, '%Y-%m-%d %H:%i') AS ts, text FROM ${C().emb(dataset)}
+    const sql = `SELECT "by", formatDateTime(time, '%Y-%m-%d %H:%i') AS ts, text FROM ${HN_ITEMS}
         WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1 FORMAT JSONCompactEachRow`;
     try {
         const url = chURL(`enable_parallel_replicas=0&default_format=JSONCompactEachRow&param_k=${encodeURIComponent(id)}`, USER_THUMBS);
