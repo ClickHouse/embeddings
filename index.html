@@ -732,7 +732,7 @@ map.on('mousemove', (e) => {
     if (mode === 'points') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);           /// nearest point -> small thumbnail
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
-map.on('mouseout', () => { hideHover(); if (thumbsHover()) hidePreview(); });   /// leaving the map: clear the thumbs preview (HN tag box cleared by hideHover)
+map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear thumbs/comment preview (tag box cleared by hideHover)
 map.on('movestart zoomstart', () => { hideHover(); hidePreview(); });           /// pan/zoom: clear any preview
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
@@ -753,7 +753,7 @@ function hoverPreview3D(cp) {   /// points mode: nearest point -> thumbnail (Pho
     const m = nearest3dMd5(cp);
     if (!m) return;
     hoverMd5 = m;                                            /// a click uses this exact point (see click3D)
-    if (isHN()) { showTagHover(m, cp, ++hoverSeq); return; }  /// HN: top-3 contrasting tokens by the cursor
+    if (isHN()) { const s = ++hoverSeq; previewComment(m); showTagHover(m, cp, s); return; }   /// HN: full comment (corner) + top-3 tokens (cursor)
     const seq = ++hoverSeq;
     const h = document.getElementById('hover');
     h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = m;
@@ -784,7 +784,7 @@ async function hoverPreview(latlng, cp) {
         const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
         if (seq !== hoverSeq || mode !== 'points' || !md5) return;   /// mouse moved / mode switched / nothing near
         hoverMd5 = md5;                                          /// remember it so a click targets exactly the shown point
-        if (isHN()) { showTagHover(md5, cp, seq); return; }      /// HN: top-3 contrasting tokens by the cursor
+        if (isHN()) { previewComment(md5); showTagHover(md5, cp, seq); return; }   /// HN: full comment (corner) + top-3 tokens (cursor)
         const h = document.getElementById('hover');
         h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = md5;
         h.onload = () => { if (seq === hoverSeq && mode === 'points') h.style.display = 'block'; };
