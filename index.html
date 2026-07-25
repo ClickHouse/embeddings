@@ -24,6 +24,10 @@
     /* top-K result thumbnails overlaid on the point cloud, centered on each image's (x,y) point */
     .topk-marker { background: none; border: 0; }
     /* HackerNews top-K: small dots on the map (no thumbnails) */
+    /* HN point-cloud hover: top-3 contrasting tokens of the nearest comment, near the cursor */
+    #hovertags { position: absolute; z-index: 1002; pointer-events: none; display: none;
+        background: rgba(0,0,0,.85); color: #ff0; font: 12px sans-serif; padding: 2px 7px; border-radius: 3px;
+        white-space: nowrap; box-shadow: 0 0 6px #000; }
     .topk-dot span { display: block; width: 100%; height: 100%; border-radius: 50%; box-sizing: border-box;
         border: 1px solid rgba(0,0,0,.75); box-shadow: 0 0 3px rgba(0,0,0,.9); }
     body.corpus-hn #modes-grp { display: none; }   /* HN has no thumbnails -> no points/thumbs choice */
@@ -138,6 +142,7 @@
 <div id="report"><div id="report-body"></div></div>
 <div id="full"><img id="full-img"><div id="full-comment"></div><div id="full-meta"></div></div>
 <img id="hover">
+<div id="hovertags"></div>
 
 <div id="error"></div>
 <script>
@@ -696,7 +701,28 @@ map.on('click', async (e) => {
 
 /// ---- Point-cloud hover: after the mouse rests ~100ms, show the nearest image's thumbnail ----
 let hoverTimer = null, hoverSeq = 0, hoverMd5 = null;
-function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null; document.getElementById('hover').style.display = 'none'; }
+function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null;
+    document.getElementById('hover').style.display = 'none'; document.getElementById('hovertags').style.display = 'none'; }
+/// HN: fetch the 3 most "contrasting" tokens of one comment (same TF-IDF as the top-K cloud) and show them by the cursor
+async function showTagHover(id, cp, seq) {
+    const TOK = `tokens(lowerUTF8(decodeHTMLComponent(extractTextFromHTML(text))))`, T = hnTokenTotal || 2.36e9;
+    const sql = `SELECT t.token FROM
+        (SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${C().emb(dataset)} WHERE ${KEY()}={k:${C().keyType}}) GROUP BY token) AS t
+        INNER JOIN (SELECT token, sum(cnt) AS cf FROM default.hackernews_tokens_stats
+                    WHERE token IN (SELECT arrayJoin(${TOK}) FROM ${C().emb(dataset)} WHERE ${KEY()}={k:${C().keyType}}) GROUP BY token HAVING cf >= 20) AS s USING (token)
+        ORDER BY (1 + log(t.tf)) * log(${T} / s.cf) DESC LIMIT 3 FORMAT TSV`;
+    try {
+        const url = chURL(`use_query_cache=0&param_k=${encodeURIComponent(id)}`, USER_THUMBS);
+        const txt = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
+        if (seq !== hoverSeq) return;                        /// a newer hover superseded this
+        const tags = txt.split('\n').filter(Boolean);
+        const el = document.getElementById('hovertags');
+        if (!tags.length) { el.style.display = 'none'; return; }
+        el.textContent = tags.join(' · ');
+        el.style.left = (cp.x + 14) + 'px'; el.style.top = (cp.y + 14) + 'px';
+        el.style.display = 'block';
+    } catch (e) { /* ignore transient hover errors */ }
+}
 const thumbsHover = () => mode === 'thumbs' && !reportActive;   /// map-thumbnail hover is active only outside topK
 map.on('mousemove', (e) => {
     hideHover();                                             /// moving -> hide, restart the dwell timer
@@ -706,7 +732,7 @@ map.on('mousemove', (e) => {
     if (mode === 'points') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);           /// nearest point -> small thumbnail
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
-map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear the thumbs/comment preview
+map.on('mouseout', () => { hideHover(); if (thumbsHover()) hidePreview(); });   /// leaving the map: clear the thumbs preview (HN tag box cleared by hideHover)
 map.on('movestart zoomstart', () => { hideHover(); hidePreview(); });           /// pan/zoom: clear any preview
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
@@ -727,7 +753,7 @@ function hoverPreview3D(cp) {   /// points mode: nearest point -> thumbnail (Pho
     const m = nearest3dMd5(cp);
     if (!m) return;
     hoverMd5 = m;                                            /// a click uses this exact point (see click3D)
-    if (isHN()) { previewComment(m); return; }               /// HN: show the nearest comment, not a thumbnail
+    if (isHN()) { showTagHover(m, cp, ++hoverSeq); return; }  /// HN: top-3 contrasting tokens by the cursor
     const seq = ++hoverSeq;
     const h = document.getElementById('hover');
     h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = m;
@@ -758,7 +784,7 @@ async function hoverPreview(latlng, cp) {
         const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
         if (seq !== hoverSeq || mode !== 'points' || !md5) return;   /// mouse moved / mode switched / nothing near
         hoverMd5 = md5;                                          /// remember it so a click targets exactly the shown point
-        if (isHN()) { previewComment(md5); return; }             /// HN: show the nearest comment, not a thumbnail
+        if (isHN()) { showTagHover(md5, cp, seq); return; }      /// HN: top-3 contrasting tokens by the cursor
         const h = document.getElementById('hover');
         h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = md5;
         h.onload = () => { if (seq === hoverSeq && mode === 'points') h.style.display = 'block'; };
