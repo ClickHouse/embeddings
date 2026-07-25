@@ -1026,7 +1026,7 @@ async function runSimilar(more) {
         /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return the id + comment
         /// fields so the report cards render with no extra lookup (the emb table carries author/text/time inline).
         const sel = isHN()
-            ? `toString(${KEY()}) AS md5, "by", substringUTF8(text, 1, 1000) AS text, formatDateTime(time, '%Y-%m-%d') AS ts`
+            ? `toString(${KEY()}) AS md5, x, y, "by", substringUTF8(text, 1, 1000) AS text, formatDateTime(time, '%Y-%m-%d') AS ts`
             : `md5, x, y`;
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
             SELECT ${sel} FROM ${table}
