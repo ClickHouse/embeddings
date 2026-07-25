@@ -24,7 +24,8 @@
     /* top-K result thumbnails overlaid on the point cloud, centered on each image's (x,y) point */
     .topk-marker { background: none; border: 0; }
     /* HackerNews top-K: small dots on the map (no thumbnails) */
-    .topk-dot { background: #ff0; border: 1.5px solid #000; border-radius: 50%; box-shadow: 0 0 4px #000; }
+    .topk-dot span { display: block; width: 100%; height: 100%; border-radius: 50%; box-sizing: border-box;
+        border: 1px solid rgba(0,0,0,.75); box-shadow: 0 0 3px rgba(0,0,0,.9); }
     body.corpus-hn #modes-grp { display: none; }   /* HN has no thumbnails -> no points/thumbs choice */
     /* HackerNews comment cards: report grid rows + the bottom-left hover preview */
     #grid.hn { display: block; }
@@ -35,8 +36,9 @@
     .hnmeta { color: #9ab; font-size: 11px; margin-bottom: 3px; }
     .hnmeta b { color: #ddd; }
     .hnmeta a { color: #ff8; }
-    .hntext { color: #ddd; font-size: 12px; line-height: 1.35; white-space: pre-wrap; word-break: break-word;
-        max-height: 6.8em; overflow: hidden; }
+    .hntext { color: #ddd; font-size: 12px; line-height: 1.35; word-break: break-word; max-height: 6.8em; overflow: hidden; }
+    .hntext p { margin: .35em 0; } .hntext p:first-child { margin-top: 0; }
+    .hntext a { color: #ff8; } .hntext pre { white-space: pre-wrap; background: #111; padding: 2px 5px; overflow-x: auto; }
     #full-comment { display: none; max-width: 42vw; padding: 8px 10px; box-sizing: border-box;
         background: rgba(0,0,0,.85); color: #ddd; font-size: 13px; line-height: 1.4; }
     #full-comment .hntext { max-height: 60vh; overflow: auto; }
@@ -543,8 +545,13 @@ let overlayPts = [];                                         /// [{md5, ll, mark
 const MAX_THUMB = 75, MIN_THUMB = 12;
 /// inverse of latlngToData: data coords (0..2^32) -> CRS.Simple latlng
 function dataToLatLng(x, y) { const s = Math.pow(2, COORD_BITS) / TILE; return map.unproject([x / s, y / s], 0); }
-function overlayIcon(md5, size) {
-    if (isHN()) return L.divIcon({ className: 'topk-dot', html: '', iconSize: [12, 12], iconAnchor: [6, 6] });   /// HN: small dot, not a thumbnail
+const hashHue = (s) => { let h = 0; s = String(s || ''); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 360; };
+function overlayIcon(md5, size, by) {
+    if (isHN()) {   /// HN: a small dot whose hue is a hash of the author, so one author's comments share a colour
+        const N = 7;
+        return L.divIcon({ className: 'topk-dot', html: `<span style="background:hsl(${hashHue(by)},85%,60%)"></span>`,
+            iconSize: [N, N], iconAnchor: [N / 2, N / 2] });
+    }
     /// start hidden (class 'loading' -> 0x0, no border); reveal onload so loading imgs don't show a border sliver
     return L.divIcon({ className: 'topk-marker',
         html: `<img src="${thumbURL(md5)}" data-md5="${md5}" draggable="false" class="loading" onload="this.classList.remove('loading')" style="width:${size}px;height:${size}px">`,
@@ -583,7 +590,8 @@ function project3dData(x, y, z) {
     const rx = R[0][0]*nx + R[0][1]*ny + R[0][2]*nz, ry = R[1][0]*nx + R[1][1]*ny + R[1][2]*nz;
     return { x: (rx * U3D_PS + 0.5) * 4294967295, y: (ry * U3D_PS + 0.5) * 4294967295 };
 }
-async function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail markers at their map points
+async function addOverlayThumbs(rows) {   /// rows: [{md5,x,y}] (Photos) | [{md5,by,…}] (HN) -> markers at their points
+    const byOf = new Map(rows.map(r => [String(r.md5), r.by]));   /// author per result (drives the HN dot hue)
     let pts = rows;
     if (is3D()) {                          /// 3D: fetch raw (x,y,z) and project through the current rotation
         const cm = await umap3dCoords(rows.map(r => r.md5));
@@ -593,15 +601,16 @@ async function addOverlayThumbs(rows) {   /// rows: [{md5, x, y}] -> thumbnail m
         pts = rows.map(r => cm.get(r.md5)).filter(Boolean);
     }
     for (const r of pts) {
+        const by = byOf.get(String(r.md5));
         const e3d = is3D() ? { x: +r.x, y: +r.y, z: +r.z } : null;   /// keep raw 3D coords to re-project on rotation
         const dc = e3d ? project3dData(e3d.x, e3d.y, e3d.z) : { x: +r.x, y: +r.y };
         const ll = dataToLatLng(dc.x, dc.y);
-        const marker = L.marker(ll, { icon: overlayIcon(r.md5, MAX_THUMB), keyboard: false, riseOnHover: true })
+        const marker = L.marker(ll, { icon: overlayIcon(r.md5, MAX_THUMB, by), keyboard: false, riseOnHover: true })
             .on('click', () => showReport(r.md5))
             .on('mouseover', () => { if (rotating) return; previewImg(r.md5); highlightTags(r.md5); })   /// no hover preview mid-rotation
             .on('mouseout', () => { hidePreview(); clearTagHl(); })
             .addTo(topkLayer);
-        overlayPts.push({ md5: r.md5, ll, marker, size: MAX_THUMB, e3d });
+        overlayPts.push({ md5: r.md5, ll, marker, size: MAX_THUMB, e3d, by });
     }
     sizeOverlay();
 }
@@ -697,7 +706,7 @@ map.on('mousemove', (e) => {
     if (mode === 'points') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);           /// nearest point -> small thumbnail
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
-map.on('mouseout', () => { hideHover(); if (thumbsHover()) hidePreview(); });   /// leaving the map: clear the thumbs preview only
+map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear the thumbs/comment preview
 map.on('movestart zoomstart', () => { hideHover(); hidePreview(); });           /// pan/zoom: clear any preview
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
@@ -714,11 +723,12 @@ function nearest3dMd5(cp) {
     }
     return (best >= 0 && bestD <= 40*40) ? md5[best] : null;   /// subset is sparse when zoomed in -> no match
 }
-function hoverPreview3D(cp) {   /// points mode: small thumbnail of the nearest point
+function hoverPreview3D(cp) {   /// points mode: nearest point -> thumbnail (Photos) / comment (HN)
     const m = nearest3dMd5(cp);
     if (!m) return;
+    hoverMd5 = m;                                            /// a click uses this exact point (see click3D)
+    if (isHN()) { previewComment(m); return; }               /// HN: show the nearest comment, not a thumbnail
     const seq = ++hoverSeq;
-    hoverMd5 = m;                                            /// a click uses this exact image (see click3D)
     const h = document.getElementById('hover');
     h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = m;
     h.onload = () => { if (seq === hoverSeq && mode === 'points' && is3D()) h.style.display = 'block'; };
@@ -747,7 +757,8 @@ async function hoverPreview(latlng, cp) {
         const url = chURL(`default_format=TSV&param_cx=${d.x}&param_cy=${d.y}&param_r=${r}`, USER_THUMBS);
         const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
         if (seq !== hoverSeq || mode !== 'points' || !md5) return;   /// mouse moved / mode switched / nothing near
-        hoverMd5 = md5;                                          /// remember it so a click targets exactly the shown image
+        hoverMd5 = md5;                                          /// remember it so a click targets exactly the shown point
+        if (isHN()) { previewComment(md5); return; }             /// HN: show the nearest comment, not a thumbnail
         const h = document.getElementById('hover');
         h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = md5;
         h.onload = () => { if (seq === hoverSeq && mode === 'points') h.style.display = 'block'; };
@@ -932,7 +943,7 @@ async function runSimilar(more) {
         /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return the id + comment
         /// fields so the report cards render with no extra lookup (the emb table carries author/text/time inline).
         const sel = isHN()
-            ? `toString(${KEY()}) AS md5, "by", substringUTF8(text, 1, 300) AS text, formatDateTime(time, '%Y-%m-%d') AS ts`
+            ? `toString(${KEY()}) AS md5, "by", substringUTF8(text, 1, 1000) AS text, formatDateTime(time, '%Y-%m-%d') AS ts`
             : `md5, x, y`;
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
             SELECT ${sel} FROM ${table}
@@ -1036,7 +1047,7 @@ function commentCard(row) {
     div.className = 'hncard'; div.dataset.md5 = id;
     div.innerHTML = `<div class="hnmeta"><b>${esc(row.by || '—')}</b> · ${row.ts || ''} · ` +
         `<a href="https://news.ycombinator.com/item?id=${id}" target="_blank" rel="noopener" onclick="event.stopPropagation()">item ↗</a></div>` +
-        `<div class="hntext">${esc(row.text || '')}</div>`;
+        `<div class="hntext">${row.text || ''}</div>`;   /// HN comment text is server-sanitised HTML -> render as-is
     div.onclick = () => showReport(id);                     /// click a comment -> search from it
     div.onmouseenter = () => previewComment(id);            /// hover -> full comment in the bottom-left card
     div.onmouseleave = () => hidePreview();
@@ -1069,7 +1080,7 @@ async function previewComment(id) {
         const [by, ts, text] = JSON.parse(txt.split('\n')[0]);
         cm.innerHTML = `<div class="hnmeta"><b>${esc(by || '—')}</b> · ${ts || ''} · ` +
             `<a href="https://news.ycombinator.com/item?id=${id}" target="_blank" rel="noopener">item ↗</a></div>` +
-            `<div class="hntext">${esc(text || '')}</div>`;
+            `<div class="hntext">${text || ''}</div>`;   /// render HN's HTML comment body
     } catch (e) { /* ignore transient metadata errors */ }
 }
 /// Look up author/license by the compact (stupidHex) md5 — pruned to one granule by the index-only
