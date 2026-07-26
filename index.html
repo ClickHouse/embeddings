@@ -225,35 +225,50 @@ const U3D = {
 /// (~4x higher) left it too dim — a few dense-core pixels bright, everything else near-black. `lq` brightens it.
 /// HackerNews: 18 models (qwen3_8b excluded — no UMAP tables, 4096-d/1.1TiB); all unit-normalised so int8 uses
 /// x*sqrt(dim) companding; randomHadamardTransform does not pad any HN dim, so rdim == dim.
+/// KEY ORDER IS THE UI ORDER (buildModelSwitch reads Object.keys), sorted by MTEB quality, best first, with the
+/// bag-of-words baseline last. The annotated score is the MTEB English average where the model publishes one; the
+/// tracks are NOT strictly comparable — embeddinggemma reports MTEB(eng, v2), kalm the multilingual board (MMTEB),
+/// and the arctic pair are retrieval-tuned, so their headline is BEIR nDCG@10 and their overall average sits lower
+/// than their retrieval rank suggests. Ranks marked ~ are approximate, placed among their published neighbours.
 const HN_MODELS = {
-    nomic:{dim:768,rdim:768,uq99:2418,lq:468}, minilm:{dim:384,rdim:384,uq99:2427,lq:448},
-    bge_small:{dim:384,rdim:384,uq99:1903,lq:489}, bge_base:{dim:768,rdim:768,uq99:1435,lq:532}, bge_large:{dim:1024,rdim:1024,uq99:4047,lq:502},
-    e5_small:{dim:384,rdim:384,uq99:3225,lq:486}, e5_base:{dim:768,rdim:768,uq99:2665,lq:581}, e5_large:{dim:1024,rdim:1024,uq99:2683,lq:493},
-    gte_small:{dim:384,rdim:384,uq99:1731,lq:409}, gte_base:{dim:768,rdim:768,uq99:2264,lq:504},
-    arctic_xs:{dim:384,rdim:384,uq99:1706,lq:597}, arctic_m:{dim:768,rdim:768,uq99:1860,lq:673},
-    jina_small:{dim:512,rdim:512,uq99:1840,lq:497}, jina_v3:{dim:1024,rdim:1024,uq99:2088,lq:458},
-    granite_small:{dim:384,rdim:384,uq99:2428,lq:519}, embeddinggemma:{dim:768,rdim:768,uq99:2789,lq:478},
-    kalm:{dim:896,rdim:896,uq99:2959,lq:472}, bow:{dim:8192,rdim:8192,uq99:3473,lq:694},
+    embeddinggemma: {dim:768,rdim:768,uq99:2789,lq:478},      /// 68.4 MTEB(eng, v2)
+    jina_v3:        {dim:1024,rdim:1024,uq99:2088,lq:458},    /// 65.5 MTEB English
+    kalm:           {dim:896,rdim:896,uq99:2959,lq:472},      /// 64.5 MMTEB
+    bge_large:      {dim:1024,rdim:1024,uq99:4047,lq:502},    /// 64.2
+    bge_base:       {dim:768,rdim:768,uq99:1435,lq:532},      /// 63.6
+    arctic_m:       {dim:768,rdim:768,uq99:1860,lq:673},      /// ~63 overall, best-in-class retrieval (54.9 BEIR)
+    gte_base:       {dim:768,rdim:768,uq99:2264,lq:504},      /// 62.4
+    nomic:          {dim:768,rdim:768,uq99:2418,lq:468},      /// 62.3
+    e5_large:       {dim:1024,rdim:1024,uq99:2683,lq:493},    /// 62.3
+    bge_small:      {dim:384,rdim:384,uq99:1903,lq:489},      /// 62.2
+    e5_base:        {dim:768,rdim:768,uq99:2665,lq:581},      /// 61.5
+    gte_small:      {dim:384,rdim:384,uq99:1731,lq:409},      /// 61.4
+    granite_small:  {dim:384,rdim:384,uq99:2428,lq:519},      /// ~61
+    arctic_xs:      {dim:384,rdim:384,uq99:1706,lq:597},      /// ~60 overall (50.2 BEIR)
+    e5_small:       {dim:384,rdim:384,uq99:3225,lq:486},      /// 59.9
+    jina_small:     {dim:512,rdim:512,uq99:1840,lq:497},      /// 58.1
+    minilm:         {dim:384,rdim:384,uq99:2427,lq:448},      /// 56.3
+    bow:            {dim:8192,rdim:8192,uq99:3473,lq:694},    /// not an MTEB model
 };
 const HN_U3D = {
-    nomic:{cx:6.6998,cy:8.4517,cz:7.0587,s:13.9534,clo:-5.8219,chi:18.7149,q99:10590},
-    minilm:{cx:-5.6794,cy:8.5372,cz:-7.7432,s:14.5927,clo:-13.5008,chi:11.0106,q99:8536},
-    bge_small:{cx:-7.9544,cy:3.8447,cz:-2.7311,s:15.0222,clo:-3.6191,chi:17.4707,q99:8028},
-    bge_base:{cx:8.9502,cy:6.8545,cz:-5.4031,s:13.1932,clo:-6.1745,chi:14.3095,q99:8152},
-    bge_large:{cx:9.4193,cy:6.5888,cz:4.6556,s:16.4183,clo:-7.1147,chi:16.6721,q99:13865},
-    e5_small:{cx:8.1809,cy:7.604,cz:-5.9489,s:15.9674,clo:-16.5262,chi:20.1746,q99:12522},
-    e5_base:{cx:-7.5419,cy:-8.1511,cz:-4.6026,s:15.7284,clo:-9.4603,chi:20.0327,q99:12573},
-    e5_large:{cx:6.6975,cy:6.789,cz:-6.6092,s:16.3282,clo:-18.887,chi:16.7164,q99:11417},
-    gte_small:{cx:-8.4914,cy:-5.976,cz:-5.829,s:13.3733,clo:-2.4923,chi:16.6668,q99:5675},
-    gte_base:{cx:7.1121,cy:-4.3628,cz:2.4986,s:17.8622,clo:-16.7269,chi:10.8457,q99:9417},
-    arctic_xs:{cx:-6.4658,cy:6.7346,cz:-6.1648,s:12.5585,clo:-2.2259,chi:18.8572,q99:5218},
-    arctic_m:{cx:-5.6483,cy:8.6027,cz:-6.8316,s:14.423,clo:-9.1807,chi:22.5875,q99:8869},
-    jina_small:{cx:-8.3232,cy:5.7957,cz:-2.8034,s:12.5963,clo:-3.5065,chi:9.5866,q99:6321},
-    jina_v3:{cx:-7.5054,cy:7.8504,cz:-6.1956,s:13.6053,clo:-4.8103,chi:21.2451,q99:6940},
-    granite_small:{cx:-7.694,cy:8.8357,cz:5.1561,s:15.72,clo:-11.34,chi:14.9382,q99:16115},
-    embeddinggemma:{cx:7.7635,cy:5.2072,cz:4.561,s:15.0837,clo:-5.1281,chi:18.7967,q99:6502},
-    kalm:{cx:-7.5525,cy:4.6083,cz:-5.5582,s:12.9469,clo:-12.9847,chi:3.1717,q99:5910},
-    bow:{cx:1.3705,cy:1.1665,cz:-3.4653,s:24.0288,clo:-16.7225,chi:22.6358,q99:21040},
+    embeddinggemma: {cx:7.7635,cy:5.2072,cz:4.561,s:15.0837,clo:-5.1281,chi:18.7967,q99:6502},
+    jina_v3:        {cx:-7.5054,cy:7.8504,cz:-6.1956,s:13.6053,clo:-4.8103,chi:21.2451,q99:6940},
+    kalm:           {cx:-7.5525,cy:4.6083,cz:-5.5582,s:12.9469,clo:-12.9847,chi:3.1717,q99:5910},
+    bge_large:      {cx:9.4193,cy:6.5888,cz:4.6556,s:16.4183,clo:-7.1147,chi:16.6721,q99:13865},
+    bge_base:       {cx:8.9502,cy:6.8545,cz:-5.4031,s:13.1932,clo:-6.1745,chi:14.3095,q99:8152},
+    arctic_m:       {cx:-5.6483,cy:8.6027,cz:-6.8316,s:14.423,clo:-9.1807,chi:22.5875,q99:8869},
+    gte_base:       {cx:7.1121,cy:-4.3628,cz:2.4986,s:17.8622,clo:-16.7269,chi:10.8457,q99:9417},
+    nomic:          {cx:6.6998,cy:8.4517,cz:7.0587,s:13.9534,clo:-5.8219,chi:18.7149,q99:10590},
+    e5_large:       {cx:6.6975,cy:6.789,cz:-6.6092,s:16.3282,clo:-18.887,chi:16.7164,q99:11417},
+    bge_small:      {cx:-7.9544,cy:3.8447,cz:-2.7311,s:15.0222,clo:-3.6191,chi:17.4707,q99:8028},
+    e5_base:        {cx:-7.5419,cy:-8.1511,cz:-4.6026,s:15.7284,clo:-9.4603,chi:20.0327,q99:12573},
+    gte_small:      {cx:-8.4914,cy:-5.976,cz:-5.829,s:13.3733,clo:-2.4923,chi:16.6668,q99:5675},
+    granite_small:  {cx:-7.694,cy:8.8357,cz:5.1561,s:15.72,clo:-11.34,chi:14.9382,q99:16115},
+    arctic_xs:      {cx:-6.4658,cy:6.7346,cz:-6.1648,s:12.5585,clo:-2.2259,chi:18.8572,q99:5218},
+    e5_small:       {cx:8.1809,cy:7.604,cz:-5.9489,s:15.9674,clo:-16.5262,chi:20.1746,q99:12522},
+    jina_small:     {cx:-8.3232,cy:5.7957,cz:-2.8034,s:12.5963,clo:-3.5065,chi:9.5866,q99:6321},
+    minilm:         {cx:-5.6794,cy:8.5372,cz:-7.7432,s:14.5927,clo:-13.5008,chi:11.0106,q99:8536},
+    bow:            {cx:1.3705,cy:1.1665,cz:-3.4653,s:24.0288,clo:-16.7225,chi:22.6358,q99:21040},
 };
 const CORPORA = {
     photos: { label: 'Photos', key: 'md5', keyType: 'String', models: DATASETS, u3d: U3D, def: 'siglip2',
