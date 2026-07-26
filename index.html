@@ -509,8 +509,13 @@ function drawThumb(ctx, px, py, md5) {
 /// HackerNews "words" word cloud: query one word per grid cell over the whole VIEWPORT, then dedup —
 /// merge adjacent (8-connected) cells sharing the same word into one label at their weighted centroid, with a
 /// font that grows with the number of merged cells. Drawn on a single overlay canvas so words are never cut.
+/// Take the word cloud down until fresh labels arrive. The canvas sits UNDER the 3D rotation preview (z 450 vs 750),
+/// so leaving it up meant the old words flashed back into view the moment the preview came down on release — a
+/// second or so before drawWords' query returned. Labels go too: they're the click hit-test targets, and stale
+/// positions would search from a word that is no longer under the cursor.
+const hideWords = () => { if (wordCanvas) wordCanvas.style.display = 'none'; wordLabels = []; };
 async function drawWords() {
-    if (!wordCanvas || !(mode === 'words' && !reportActive)) { if (wordCanvas) wordCanvas.style.display = 'none'; return; }
+    if (!wordCanvas || !(mode === 'words' && !reportActive)) { hideWords(); return; }
     const seq = ++wordSeq, cont = map.getContainer(), W = cont.clientWidth, H = cont.clientHeight;
     if (wordCanvas.width !== W) wordCanvas.width = W;
     if (wordCanvas.height !== H) wordCanvas.height = H;
@@ -685,7 +690,7 @@ function applyMode() {
     pointLayer.setOpacity(showThumbs ? 0.5 : 1);   /// dim only under thumbnails; keep points full-strength under the word cloud
     if (showThumbs) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
     else if (map.hasLayer(thumbLayer)) map.removeLayer(thumbLayer);
-    if (showWords) drawWords(); else if (wordCanvas) wordCanvas.style.display = 'none';
+    if (showWords) drawWords(); else hideWords();
 }
 /// Re-render the point cloud for projection / 3D-rotation changes (tile coordinates genuinely change),
 /// NOT for points<->thumbs (see applyMode). The point-cloud tiles are re-rendered IN PLACE — each keeps
@@ -893,7 +898,7 @@ map.on('mousemove', (e) => {
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
 map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear thumbs/comment preview (tag box cleared by hideHover)
-map.on('movestart zoomstart', () => { hideHover(); hidePreview(); if (mode === 'words' && wordCanvas) wordCanvas.style.display = 'none'; });   /// pan/zoom: clear previews + the (now-misaligned) word cloud
+map.on('movestart zoomstart', () => { hideHover(); hidePreview(); if (mode === 'words') hideWords(); });   /// pan/zoom: clear previews + the (now-misaligned) word cloud
 map.on('moveend zoomend', () => { if (mode === 'words' && !reportActive) drawWords(); });   /// re-render the word cloud for the new viewport
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
@@ -1602,7 +1607,7 @@ async function endRotate(cx, cy, evForClick) {
     if (len < 1) { if (!rPending) hideRotPreview(); return; }   /// dragged but ended back at the start -> no net rotation (and not a click)
     R = matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);  /// pre-multiply: rotate in view space (angle slows with zoom)
     if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
-    if (mode === 'words') drawWords();                             /// re-project the word cloud to the new 3D orientation
+    if (mode === 'words') { hideWords(); drawWords(); }            /// re-project the word cloud to the new 3D orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
     const done = redraw(); updateURL();                            /// NOT drawPreview(cx,cy), which would re-apply the drag)
     rPending++;
@@ -1645,6 +1650,7 @@ map.getContainer().addEventListener('mousedown', (e) => {
     } else if (e.button === 0) {
         rotating = true; rStart = { x: e.clientX, y: e.clientY }; rMoved = 0; rLast = null; document.body.classList.add('rotating');
         hidePreview(); clearTagHl();   /// clear any hover full-image/tag highlight before it gets stuck behind the preview
+        if (mode === 'words') hideWords();   /// the labels are about to be misaligned (and the preview may not cover them)
         startPreview();
     }
 });
@@ -1696,6 +1702,7 @@ map.getContainer().addEventListener('touchstart', (e) => {
     noClick = endGesture(lastDragPos().x, lastDragPos().y);   /// a live gesture here means its touchend was lost
     dragArmed = false; dragZeros = 0;   /// touch never reports `buttons`; keep the mouse net disarmed for this drag
     rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; rMoved = 0; rLast = null;
+    if (mode === 'words') hideWords();
     document.body.classList.add('rotating'); startPreview();
 }, { passive: true });
 map.getContainer().addEventListener('touchmove', (e) => {
