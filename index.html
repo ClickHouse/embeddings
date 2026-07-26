@@ -9,6 +9,10 @@
 <style>
     html, body { margin: 0; height: 100%; background: #000; color: #eee;
         font-family: system-ui, sans-serif; overflow: hidden; }
+    /* No text selection anywhere on the map or its controls: a drag that starts a native selection (or, worse, a
+       native image drag) steals the gesture — the browser stops sending mousemove and never sends mouseup, so a
+       3D rotation was left uncommitted — and it also left the +/- zoom buttons' glyphs highlighted afterwards. */
+    #map, #map * { user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
     #map { position: absolute; inset: 0; background: #000; cursor: crosshair; }
     body.proj3d #map { cursor: grab; }                              /* UMAP 3D: drag to rotate */
     body.proj3d.rotating #map, body.rotating { cursor: grabbing; }
@@ -505,8 +509,13 @@ function drawThumb(ctx, px, py, md5) {
 /// HackerNews "words" word cloud: query one word per grid cell over the whole VIEWPORT, then dedup —
 /// merge adjacent (8-connected) cells sharing the same word into one label at their weighted centroid, with a
 /// font that grows with the number of merged cells. Drawn on a single overlay canvas so words are never cut.
+/// Take the word cloud down until fresh labels arrive. The canvas sits UNDER the 3D rotation preview (z 450 vs 750),
+/// so leaving it up meant the old words flashed back into view the moment the preview came down on release — a
+/// second or so before drawWords' query returned. Labels go too: they're the click hit-test targets, and stale
+/// positions would search from a word that is no longer under the cursor.
+const hideWords = () => { if (wordCanvas) wordCanvas.style.display = 'none'; wordLabels = []; };
 async function drawWords() {
-    if (!wordCanvas || !(mode === 'words' && !reportActive)) { if (wordCanvas) wordCanvas.style.display = 'none'; return; }
+    if (!wordCanvas || !(mode === 'words' && !reportActive)) { hideWords(); return; }
     const seq = ++wordSeq, cont = map.getContainer(), W = cont.clientWidth, H = cont.clientHeight;
     if (wordCanvas.width !== W) wordCanvas.width = W;
     if (wordCanvas.height !== H) wordCanvas.height = H;
@@ -681,7 +690,7 @@ function applyMode() {
     pointLayer.setOpacity(showThumbs ? 0.5 : 1);   /// dim only under thumbnails; keep points full-strength under the word cloud
     if (showThumbs) { if (!map.hasLayer(thumbLayer)) thumbLayer.addTo(map); }
     else if (map.hasLayer(thumbLayer)) map.removeLayer(thumbLayer);
-    if (showWords) drawWords(); else if (wordCanvas) wordCanvas.style.display = 'none';
+    if (showWords) drawWords(); else hideWords();
 }
 /// Re-render the point cloud for projection / 3D-rotation changes (tile coordinates genuinely change),
 /// NOT for points<->thumbs (see applyMode). The point-cloud tiles are re-rendered IN PLACE — each keeps
@@ -889,7 +898,7 @@ map.on('mousemove', (e) => {
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
 map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear thumbs/comment preview (tag box cleared by hideHover)
-map.on('movestart zoomstart', () => { hideHover(); hidePreview(); if (mode === 'words' && wordCanvas) wordCanvas.style.display = 'none'; });   /// pan/zoom: clear previews + the (now-misaligned) word cloud
+map.on('movestart zoomstart', () => { hideHover(); hidePreview(); if (mode === 'words') hideWords(); });   /// pan/zoom: clear previews + the (now-misaligned) word cloud
 map.on('moveend zoomend', () => { if (mode === 'words' && !reportActive) drawWords(); });   /// re-render the word cloud for the new viewport
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
@@ -1584,30 +1593,64 @@ function hideRotPreview() { if (pvRAF) { cancelAnimationFrame(pvRAF); pvRAF = nu
 /// Rotation is applied ONCE, on release (not during the drag). The drag start->end vector d and the view
 /// normal span the rotation plane; the rotation axis is the in-screen vector perpendicular to d, i.e. (-dy,dx,0)
 /// (so the visible projection plane itself is never rotated — points tilt into/out of depth along the drag).
-let rotating = false, rStart = null, rMoved = 0, panning = false, panStart = null;
+let rotating = false, rStart = null, rMoved = 0, rLast = null, panning = false, panStart = null;
+let rPending = 0;      /// committed rotations still waiting for their server tiles (the preview must stay up)
+let noClick = false;   /// this drag began by recovering a stuck gesture -> its release must not count as a click
+let dragArmed = false, dragZeros = 0;   /// mousemove lost-release net: seen the button down? / consecutive 0 reports
 let zooming = false, zStart = null, zRAF = 0, zTarget = 0;   /// 2D: right-button / modifier smooth drag-to-zoom
 async function endRotate(cx, cy, evForClick) {
-    rotating = false; document.body.classList.remove('rotating');
+    rotating = false; rLast = null; document.body.classList.remove('rotating');
     /// click vs rotate is decided by the MAX movement during the drag (rMoved), not the start->end distance:
     /// a rotation that curves back near where it began still has small start->end distance but large rMoved.
-    if (rMoved < 5) { hideRotPreview(); if (evForClick) click3D(evForClick); return; }   /// barely moved -> click -> report
+    if (rMoved < 5) { if (!rPending) hideRotPreview(); if (evForClick) click3D(evForClick); return; }   /// barely moved -> click -> report
     const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
-    if (len < 1) { hideRotPreview(); return; }   /// dragged but ended back at the start -> no net rotation (and not a click)
+    if (len < 1) { if (!rPending) hideRotPreview(); return; }   /// dragged but ended back at the start -> no net rotation (and not a click)
     R = matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);  /// pre-multiply: rotate in view space (angle slows with zoom)
     if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
-    if (mode === 'words') drawWords();                             /// re-project the word cloud to the new 3D orientation
+    if (mode === 'words') { hideWords(); drawWords(); }            /// re-project the word cloud to the new 3D orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
     const done = redraw(); updateURL();                            /// NOT drawPreview(cx,cy), which would re-apply the drag)
+    rPending++;
     try { await done; } catch (e) {}
-    if (!rotating) hideRotPreview();                                /// ...until the server tiles catch up (unless a new drag started)
+    rPending--;
+    if (!rotating && !rPending) hideRotPreview();                   /// ...until the server tiles catch up (unless a new drag started)
 }
+function endPan() { panning = false; document.body.classList.remove('rotating'); updateURL(); }
+function endZoom() {
+    zooming = false;
+    if (zRAF) { cancelAnimationFrame(zRAF); zRAF = 0; }
+    map.options.zoomSnap = 1;                                                          /// restore integer snapping (wheel/buttons)
+    map.setZoomAround(zStart.latlng, Math.round(map.getZoom()), { animate: true });    /// settle to a crisp integer zoom level
+    map.dragging.enable(); document.body.classList.remove('zoomdrag'); updateURL();
+}
+/// A mouseup can be lost — released outside the window, over devtools, swallowed by a native drag, or eaten by an
+/// alt-tab — which used to leave `rotating` stuck on: the rotation was never committed, and the next mousedown
+/// restarted the drag from scratch so its release looked like a plain click and opened the top-K report instead of
+/// just finishing the rotation. endGesture finishes whatever gesture is still live, as if the button had been
+/// released at (cx,cy) and WITHOUT counting it as a click; it returns true if there was one. Three safety nets call
+/// it: the next mousedown (window capture, so it runs before the gesture handlers below), any mouse move with no
+/// button held, and window blur.
+function endGesture(cx, cy) {
+    if (panning) endPan();
+    else if (rotating) endRotate(cx, cy, null);
+    else if (zooming) endZoom();
+    else return false;
+    return true;
+}
+/// where the pointer last was while the button was down — the release we missed happened there, not at the
+/// cursor's current position (the user may have moved on since), so recovery commits the rotation from here
+const lastDragPos = () => rLast || rStart || { x: 0, y: 0 };
+addEventListener('mousedown', () => { noClick = endGesture(lastDragPos().x, lastDragPos().y); }, true);
+addEventListener('blur', () => endGesture(lastDragPos().x, lastDragPos().y));
 map.getContainer().addEventListener('mousedown', (e) => {
     if (!is3D()) return;
+    dragArmed = false; dragZeros = 0;
     if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey))) {   /// right-drag OR Ctrl/Cmd+drag pans the map (live) instead of rotating
         panning = true; panStart = { x: e.clientX, y: e.clientY }; document.body.classList.add('rotating');
     } else if (e.button === 0) {
-        rotating = true; rStart = { x: e.clientX, y: e.clientY }; rMoved = 0; document.body.classList.add('rotating');
+        rotating = true; rStart = { x: e.clientX, y: e.clientY }; rMoved = 0; rLast = null; document.body.classList.add('rotating');
         hidePreview(); clearTagHl();   /// clear any hover full-image/tag highlight before it gets stuck behind the preview
+        if (mode === 'words') hideWords();   /// the labels are about to be misaligned (and the preview may not cover them)
         startPreview();
     }
 });
@@ -1616,7 +1659,7 @@ map.getContainer().addEventListener('mousedown', (e) => {
 map.getContainer().addEventListener('mousedown', (e) => {
     if (is3D()) return;
     if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey || e.altKey))) {
-        zooming = true;
+        zooming = true; dragArmed = false; dragZeros = 0;
         zStart = { y: e.clientY, zoom: map.getZoom(), latlng: map.mouseEventToLatLng(e) };
         map.options.zoomSnap = 0;   /// allow fractional zoom during the drag (smooth)
         map.dragging.disable(); document.body.classList.add('zoomdrag');
@@ -1625,12 +1668,24 @@ map.getContainer().addEventListener('mousedown', (e) => {
 }, true);
 /// suppress the browser context menu over the map so a right-button drag (zoom in 2D, pan in 3D) doesn't pop it
 map.getContainer().addEventListener('contextmenu', (e) => e.preventDefault());
+/// Never let a drag on the map become a native drag-and-drop (tile/thumbnail <img>s are draggable by default):
+/// once one starts, mousemove stops and mouseup is never delivered, which is what dropped the rotation's release.
+map.getContainer().addEventListener('dragstart', (e) => e.preventDefault());
 addEventListener('mousemove', (e) => {
+    /// `e.buttons` reveals a release we never got a mouseup for, but it can't be trusted blindly: some browsers
+    /// report 0 for moves during a drag whose mousedown was preventDefault'ed, which would abort the drag the
+    /// instant it starts. So arm this net only after a move has actually reported the button DOWN, and require two
+    /// consecutive zero reports so one stray event can't end the gesture.
+    if (rotating || panning || zooming) {
+        if (e.buttons) { dragArmed = true; dragZeros = 0; }
+        else if (dragArmed && ++dragZeros >= 2) { dragZeros = 0; endGesture(lastDragPos().x, lastDragPos().y); return; }
+    }
     if (panning) {   /// live pan (Leaflet drag is off in 3D so we drive panBy ourselves)
         map.panBy([panStart.x - e.clientX, panStart.y - e.clientY], { animate: false });
         panStart = { x: e.clientX, y: e.clientY };
     } else if (rotating) {
         rMoved = Math.max(rMoved, Math.hypot(e.clientX - rStart.x, e.clientY - rStart.y));   /// track max movement (click vs rotate)
+        rLast = { x: e.clientX, y: e.clientY };
         requestPreview(e.clientX, e.clientY);   /// live rotation preview
     } else if (zooming) {   /// 2D smooth drag-to-zoom around the drag's start point (drag up = zoom in), rAF-throttled
         zTarget = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zStart.zoom + (zStart.y - e.clientY) / 70));
@@ -1638,27 +1693,27 @@ addEventListener('mousemove', (e) => {
     }
 });
 addEventListener('mouseup', (e) => {
-    if (panning) { panning = false; document.body.classList.remove('rotating'); updateURL(); }
-    else if (rotating) endRotate(e.clientX, e.clientY, e);
-    else if (zooming) {
-        zooming = false;
-        if (zRAF) { cancelAnimationFrame(zRAF); zRAF = 0; }
-        map.options.zoomSnap = 1;                                                          /// restore integer snapping (wheel/buttons)
-        map.setZoomAround(zStart.latlng, Math.round(map.getZoom()), { animate: true });    /// settle to a crisp integer zoom level
-        map.dragging.enable(); document.body.classList.remove('zoomdrag'); updateURL();
-    }
+    if (panning) endPan();
+    else if (rotating) endRotate(e.clientX, e.clientY, noClick ? null : e);   /// noClick: this drag only ended a stuck one
+    else if (zooming) endZoom();
 });
 map.getContainer().addEventListener('touchstart', (e) => {
     if (!is3D() || e.touches.length !== 1) return;
-    rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; rMoved = 0; document.body.classList.add('rotating'); startPreview();
+    noClick = endGesture(lastDragPos().x, lastDragPos().y);   /// a live gesture here means its touchend was lost
+    dragArmed = false; dragZeros = 0;   /// touch never reports `buttons`; keep the mouse net disarmed for this drag
+    rotating = true; rStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; rMoved = 0; rLast = null;
+    if (mode === 'words') hideWords();
+    document.body.classList.add('rotating'); startPreview();
 }, { passive: true });
 map.getContainer().addEventListener('touchmove', (e) => {
     if (rotating && e.touches.length === 1) {
         rMoved = Math.max(rMoved, Math.hypot(e.touches[0].clientX - rStart.x, e.touches[0].clientY - rStart.y));
+        rLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
         requestPreview(e.touches[0].clientX, e.touches[0].clientY);
     }
 }, { passive: true });
-addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, t); } });
+addEventListener('touchend', (e) => { if (rotating) { const t = e.changedTouches[0]; endRotate(t.clientX, t.clientY, noClick ? null : t); } });
+addEventListener('touchcancel', () => endGesture(lastDragPos().x, lastDragPos().y));
 /// click in 3D: nearest point in the current rotated projection (full scan) -> report
 async function click3D(e) {
     /// thumbs: open the report for EXACTLY the clicked thumbnail — read from the rendered tiles, no query
