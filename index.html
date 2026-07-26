@@ -273,9 +273,11 @@ const HN_U3D = {
 const CORPORA = {
     photos: { label: 'Photos', key: 'md5', keyType: 'String', models: DATASETS, u3d: U3D, def: 'siglip2',
         projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image',
+        attrib: 'data: Multimedia Commons, CC Licenses',   /// data clause of the map attribution legend (setAttribution)
         emb: m => `mmcommons.emb_${m}`, u2: m => `mmcommons.umap_${m}_2d`, u3: m => `mmcommons.umap_${m}_3d` },
     hn: { label: 'HackerNews', key: 'id', keyType: 'UInt32', models: HN_MODELS, u3d: HN_U3D, def: 'nomic',
         projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'words'], render: 'comment',
+        attrib: 'Data: Hacker News',
         emb: m => `default.hackernews_embeddings_${m}`, u2: m => `default.hackernews_umap_${m}_2d`, u3: m => `default.hackernews_umap_${m}_3d` },
 };
 const C = () => CORPORA[corpus];        /// current corpus config
@@ -656,9 +658,18 @@ function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}
 /// ---- Map ----
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 22,
     zoomControl: true, attributionControl: true });
-/// About / attribution legend (bottom-right of the map; moves with the map when the report panel opens)
-map.attributionControl.setPrefix(false).addAttribution(
-    '<a href="https://github.com/ClickHouse/embeddings" target="_blank" rel="noopener">About</a> | © Alexey Milovidov, ClickHouse, Inc. (data: Multimedia Commons, CC Licenses)');
+/// About / attribution legend (bottom-right of the map; moves with the map when the report panel opens).
+/// The data clause names the corpus on display (C().attrib), so this is re-set on every corpus switch.
+map.attributionControl.setPrefix(false);
+let attribCur = null;
+function setAttribution() {
+    const html = '<a href="https://github.com/ClickHouse/embeddings" target="_blank" rel="noopener">About</a>' +
+        ` | © Alexey Milovidov, ClickHouse, Inc. (${C().attrib})`;
+    if (html === attribCur) return;
+    if (attribCur) map.attributionControl.removeAttribution(attribCur);
+    map.attributionControl.addAttribution(attribCur = html);
+}
+setAttribution();
 /// world = the 2^32 data plane (crs pixels [0,TILE] at zoom 0)
 const worldBounds = L.latLngBounds(map.unproject([0, TILE], 0), map.unproject([TILE, 0], 0));
 map.setMaxBounds(worldBounds.pad(0.3));
@@ -1510,6 +1521,7 @@ function switchCorpus(k) {
     if (k === corpus || !CORPORA[k]) return;
     corpus = k;
     document.body.classList.toggle('corpus-hn', isHN());
+    setAttribution();
     if (reportActive) hideReport();
     dataset = C().def;
     if (!C().modes.includes(mode)) mode = C().modes[0];
@@ -1527,6 +1539,7 @@ buildModelSwitch();
 buildModeSwitch();
 buildProjSwitch();
 document.body.classList.toggle('corpus-hn', isHN());
+setAttribution();   /// the map was built before the URL was parsed, so re-set it for a #corpus=hn deep link
 /// UMAP 3D: drag rotates the cloud, right-drag or Ctrl/Cmd+drag pans (Leaflet pan disabled); wheel still zooms. Cursor -> grab / grabbing.
 function set3DMode(on) {
     document.body.classList.toggle('proj3d', on);
@@ -1842,6 +1855,7 @@ function applyState(urlp) {
         dataset = nd; mode = nm; proj = np;
         if (corpusChanged) {
             document.body.classList.toggle('corpus-hn', isHN());
+            setAttribution();
             buildModelSwitch(); buildModeSwitch(); buildProjSwitch(); selectSwitch('corpora', C().label);
         } else {
             selectSwitch('datasets', dataset); selectSwitch('modes', mode); selectSwitch('projs', proj);
