@@ -669,8 +669,11 @@ function makeGrid(render, zIndex) {
         render(coords, c).then(() => done(null, c)).catch(() => done(null, c));
         return c;
     }});
+    /// updateWhenZooming: false — a tile here is a ~1s ClickHouse query, so never switch tile levels mid-gesture:
+    /// during the 2D drag-to-zoom (below) the already-rendered tiles are just CSS-scaled, and one real level is
+    /// loaded when the gesture settles. (Only consulted when the zoom is driven with noUpdate, i.e. pinch/drag-zoom.)
     return new Grid({ tileSize: TILE, minZoom: 0, maxZoom: 22, maxNativeZoom: 20, minNativeZoom: 0,
-        bounds: worldBounds, noWrap: true, zIndex });
+        bounds: worldBounds, noWrap: true, zIndex, updateWhenZooming: false });
 }
 function makeLayer() {
     if (pointLayer) map.removeLayer(pointLayer);
@@ -1608,7 +1611,7 @@ let rotating = false, rStart = null, rMoved = 0, rLast = null, panning = false, 
 let rPending = 0;      /// committed rotations still waiting for their server tiles (the preview must stay up)
 let noClick = false;   /// this drag began by recovering a stuck gesture -> its release must not count as a click
 let dragArmed = false, dragZeros = 0;   /// mousemove lost-release net: seen the button down? / consecutive 0 reports
-let zooming = false, zStart = null, zRAF = 0, zTarget = 0;   /// 2D: right-button / modifier smooth drag-to-zoom
+let zooming = false, zStart = null, zRAF = 0, zTarget = 0, zMoved = false;   /// 2D: right-button / modifier smooth drag-to-zoom
 async function endRotate(cx, cy, evForClick) {
     rotating = false; rLast = null; document.body.classList.remove('rotating');
     /// click vs rotate is decided by the MAX movement during the drag (rMoved), not the start->end distance:
@@ -1628,11 +1631,32 @@ async function endRotate(cx, cy, evForClick) {
     if (!rotating && !rPending) hideRotPreview();                   /// ...until the server tiles catch up (unless a new drag started)
 }
 function endPan() { panning = false; document.body.classList.remove('rotating'); updateURL(); }
+/// the center that keeps `anchor` pinned to the screen point it currently occupies (the math in setZoomAround)
+function zoomAnchorCenter(anchor, zoom) {
+    const scale = map.getZoomScale(zoom), half = map.getSize().divideBy(2);
+    const off = map.latLngToContainerPoint(anchor).subtract(half).multiplyBy(1 - 1 / scale);
+    return map.containerPointToLatLng(half.add(off));
+}
+/// The 2D drag-to-zoom is driven exactly like Leaflet's own pinch-zoom: while the button is down we only ever
+/// CSS-scale the tiles that are already on screen (map._move with pinch:true, which GridLayer answers by
+/// transforming its existing levels instead of loading new ones — see updateWhenZooming in makeGrid), and one real
+/// zoom is committed here when the gesture ends. Calling setZoomAround({animate:false}) per frame, as this used to,
+/// goes through Map._resetView -> 'viewprereset' -> GridLayer._invalidateAll(), which DESTROYS every tile and
+/// restarts its ~1s query — on every animation frame of the drag. That is why the map went black while dragging.
 function endZoom() {
     zooming = false;
     if (zRAF) { cancelAnimationFrame(zRAF); zRAF = 0; }
-    map.options.zoomSnap = 1;                                                          /// restore integer snapping (wheel/buttons)
-    map.setZoomAround(zStart.latlng, Math.round(map.getZoom()), { animate: true });    /// settle to a crisp integer zoom level
+    map.options.zoomSnap = 1;                                    /// restore integer snapping (wheel/buttons)
+    if (zMoved) {                                                /// settle on a crisp integer level, animating from the dragged scale
+        const z = map._limitZoom(Math.round(map.getZoom())), c = zoomAnchorCenter(zStart.latlng, z);
+        /// noUpdate MUST be false here: the drag left the tile level deliberately stale, and this is what asks the
+        /// grid to load the committed one. It does so with noPrune, so the scaled old tiles stay up until the
+        /// replacements have rendered — the cloud never blanks. (Not relying on _animateZoom's internal
+        /// _tempFireZoomEvent, which skips the reload when the drag happens to end on an exact integer zoom.)
+        if (map.options.zoomAnimation) map._animateZoom(c, z, true, false);
+        else map._resetView(c, z);
+    }
+    zMoved = false;
     map.dragging.enable(); document.body.classList.remove('zoomdrag'); updateURL();
 }
 /// A mouseup can be lost — released outside the window, over devtools, swallowed by a native drag, or eaten by an
@@ -1671,7 +1695,9 @@ map.getContainer().addEventListener('mousedown', (e) => {
 map.getContainer().addEventListener('mousedown', (e) => {
     if (is3D()) return;
     if (e.button === 2 || (e.button === 0 && (e.ctrlKey || e.metaKey || e.altKey))) {
-        zooming = true; dragArmed = false; dragZeros = 0;
+        zooming = true; zMoved = false; dragArmed = false; dragZeros = 0;
+        map._stop();   /// don't fight a pan animation that is still running, nor the 250ms commit of a previous
+        if (map._animatingZoom) map._onZoomTransitionEnd();   /// drag-zoom (it would yank the view mid-gesture)
         zStart = { y: e.clientY, zoom: map.getZoom(), latlng: map.mouseEventToLatLng(e) };
         map.options.zoomSnap = 0;   /// allow fractional zoom during the drag (smooth)
         map.dragging.disable(); document.body.classList.add('zoomdrag');
@@ -1701,7 +1727,11 @@ addEventListener('mousemove', (e) => {
         requestPreview(e.clientX, e.clientY);   /// live rotation preview
     } else if (zooming) {   /// 2D smooth drag-to-zoom around the drag's start point (drag up = zoom in), rAF-throttled
         zTarget = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zStart.zoom + (zStart.y - e.clientY) / 70));
-        if (!zRAF) zRAF = requestAnimationFrame(() => { zRAF = 0; if (zooming) map.setZoomAround(zStart.latlng, zTarget, { animate: false }); });
+        if (!zMoved) { zMoved = true; map._moveStart(true, false); }   /// open the gesture (fires zoomstart/movestart) only once it really moves
+        if (!zRAF) zRAF = requestAnimationFrame(() => {
+            zRAF = 0;
+            if (zooming) map._move(zoomAnchorCenter(zStart.latlng, zTarget), zTarget, { pinch: true, round: false });
+        });
     }
 });
 addEventListener('mouseup', (e) => {
