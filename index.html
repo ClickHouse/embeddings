@@ -846,8 +846,9 @@ map.on('click', async (e) => {
     const d = latlngToData(e.latlng);
     /// thumbs: open the report for EXACTLY the clicked thumbnail — read from the rendered tiles, no query
     if (mode === 'thumbs') { const m = thumbMd5At(d); if (m) showReport(m); else setStatus('no thumbnail here'); return; }
-    /// point-cloud: if the hover thumbnail is showing, target exactly that image (what the user sees)
-    if (hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }
+    /// point-cloud: if a hover resolved here, target exactly that image / comment (what the user is looking at)
+    const hm = hoverTarget(e.containerPoint);
+    if (hm) { dropHover(); showReport(hm); return; }
     const { table, xc, yc } = projCfg();
     setStatus('finding point…');
     try {
@@ -865,9 +866,19 @@ map.on('click', async (e) => {
 });
 
 /// ---- Point-cloud hover: after the mouse rests ~100ms, show the nearest image's thumbnail ----
-let hoverTimer = null, hoverSeq = 0, hoverMd5 = null;
+let hoverTimer = null, hoverSeq = 0, hoverMd5 = null, hoverAt = null;   /// hoverAt: {md5,x,y} of the last RESOLVED hover
 function hideHover() { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } hoverMd5 = null;
+    ++hoverSeq;   /// invalidate in-flight lookups: a late tag/thumbnail response must not repaint a hover we just cleared
     document.getElementById('hover').style.display = 'none'; document.getElementById('hovertags').style.display = 'none'; }
+/// hoverAt is only meaningful while the view holds still — drop it (not just the dwell) when the projection,
+/// rotation, mode or viewport changes, since its screen position then refers to a point that has moved.
+function dropHover() { hideHover(); hoverAt = null; }
+/// What a click at `cp` should open. hoverMd5 alone is not enough: every mousemove clears it to restart the dwell
+/// timer, so the slightest jitter before the click loses it — and the fallback lookups do NOT agree with the hover.
+/// In 3D especially, the hover picks the nearest point in the 100k preview subset while a click does a full scan
+/// over every point, so the click would open a DIFFERENT comment than the three words on screen came from. Reuse
+/// the last resolved hover when the click lands essentially on top of where it resolved.
+const hoverTarget = (cp) => hoverMd5 || (hoverAt && Math.hypot(hoverAt.x - cp.x, hoverAt.y - cp.y) <= 12 ? hoverAt.md5 : null);
 /// HN: fetch the 3 most "contrasting" tokens of one comment (same TF-IDF as the top-K cloud) and show them by the cursor
 async function showTagHover(id, cp, seq) {
     const TOK = `tokens(lowerUTF8(decodeHTMLComponent(extractTextFromHTML(text))))`, T = hnTokenTotal || 2.36e9;
@@ -897,8 +908,8 @@ map.on('mousemove', (e) => {
     if (mode === 'points' || mode === 'words') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);   /// nearest point -> thumbnail (Photos) / comment (HN); also under the word cloud
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
-map.on('mouseout', () => { hideHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear thumbs/comment preview (tag box cleared by hideHover)
-map.on('movestart zoomstart', () => { hideHover(); hidePreview(); if (mode === 'words') hideWords(); });   /// pan/zoom: clear previews + the (now-misaligned) word cloud
+map.on('mouseout', () => { dropHover(); if (thumbsHover() || (isHN() && mode === 'points')) hidePreview(); });   /// leaving the map: clear thumbs/comment preview (tag box cleared by hideHover)
+map.on('movestart zoomstart', () => { dropHover(); hidePreview(); if (mode === 'words') hideWords(); });   /// pan/zoom: clear previews + the (now-misaligned) word cloud
 map.on('moveend zoomend', () => { if (mode === 'words' && !reportActive) drawWords(); });   /// re-render the word cloud for the new viewport
 /// UMAP 3D nearest point CLIENT-SIDE in the loaded 100k subset (projected through the current rotation) — instant,
 /// no ~1s full scan. Less precise than a server lookup, so returns null when the nearest is too far from the cursor.
@@ -918,7 +929,7 @@ function nearest3dMd5(cp) {
 function hoverPreview3D(cp) {   /// points mode: nearest point -> thumbnail (Photos) / comment (HN)
     const m = nearest3dMd5(cp);
     if (!m) return;
-    hoverMd5 = m;                                            /// a click uses this exact point (see click3D)
+    hoverMd5 = m; hoverAt = { md5: m, x: cp.x, y: cp.y };    /// a click uses this exact point (see hoverTarget / click3D)
     if (isHN()) { const s = ++hoverSeq; previewComment(m); showTagHover(m, cp, s); return; }   /// HN: full comment (corner) + top-3 tokens (cursor)
     const seq = ++hoverSeq;
     const h = document.getElementById('hover');
@@ -949,7 +960,7 @@ async function hoverPreview(latlng, cp) {
         const url = chURL(`default_format=TSV&param_cx=${d.x}&param_cy=${d.y}&param_r=${r}`, USER_THUMBS);
         const md5 = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
         if (seq !== hoverSeq || mode !== 'points' || !md5) return;   /// mouse moved / mode switched / nothing near
-        hoverMd5 = md5;                                          /// remember it so a click targets exactly the shown point
+        hoverMd5 = md5; hoverAt = { md5, x: cp.x, y: cp.y };      /// remember it so a click targets exactly the shown point
         if (isHN()) { previewComment(md5); showTagHover(md5, cp, seq); return; }   /// HN: full comment (corner) + top-3 tokens (cursor)
         const h = document.getElementById('hover');
         h.style.left = (cp.x + 14) + 'px'; h.style.top = (cp.y + 14) + 'px'; h.title = md5;
@@ -1461,14 +1472,14 @@ function buildModeSwitch() {
     buildSwitch('modes', C().modes, mode, k => {
         mode = k;
         if (k !== 'points' && reportActive) hideReport();   /// overlay modes (thumbs/words) have no top-K panel — close it on switch
-        hideHover(); applyMode(); updateURL();               /// toggle the thumb overlay; keep the point cloud as-is
+        dropHover(); applyMode(); updateURL();               /// toggle the thumb overlay; keep the point cloud as-is
     });
 }
 function buildProjSwitch() {
     buildSwitch('projs', C().projs, proj, k => {
         proj = k;
         set3DMode(is3D());
-        hideHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
+        dropHover(); applyMode(); redraw();                  /// toggle thumb overlay for 2D/3D, then re-render the point cloud for the new projection
         /// re-place the top-K overlay for the new projection (incl. 3D) and fit to it; else reset to the full view
         if (reportActive) { armFit(); clearOverlay(); addOverlayThumbs(lastRows).then(() => { if (!mapTouchedSinceSwitch) fitToOverlay(); }); }
         else resetView();
@@ -1487,7 +1498,7 @@ function switchCorpus(k) {
     if (!C().projs.includes(proj)) proj = C().projs.includes('UMAP') ? 'UMAP' : C().projs[0];
     buildModelSwitch(); buildModeSwitch(); buildProjSwitch();
     set3DMode(is3D());
-    hideHover(); hidePreview();
+    dropHover(); hidePreview();
     makeLayer();
     resetView();
     updateURL();
@@ -1606,6 +1617,7 @@ async function endRotate(cx, cy, evForClick) {
     const dx = cx - rStart.x, dy = cy - rStart.y, len = Math.hypot(dx, dy);
     if (len < 1) { if (!rPending) hideRotPreview(); return; }   /// dragged but ended back at the start -> no net rotation (and not a click)
     R = matMul(axisAngle(-dy / len, dx / len, 0, rotAngle(len)), R);  /// pre-multiply: rotate in view space (angle slows with zoom)
+    hoverAt = null;                                                /// the projection moved: a pre-rotation hover no longer sits under its screen position
     if (reportActive) reprojectOverlay3D();                        /// move the top-K thumbnails to the new orientation
     if (mode === 'words') { hideWords(); drawWords(); }            /// re-project the word cloud to the new 3D orientation
     drawPreview(rStart.x, rStart.y);                               /// hold the final orientation (zero delta -> Rp==R;
@@ -1718,7 +1730,10 @@ addEventListener('touchcancel', () => endGesture(lastDragPos().x, lastDragPos().
 async function click3D(e) {
     /// thumbs: open the report for EXACTLY the clicked thumbnail — read from the rendered tiles, no query
     if (mode === 'thumbs' && !reportActive) { const m = thumbMd5At(latlngToData(map.mouseEventToLatLng(e))); if (m) showReport(m); else setStatus('no thumbnail here'); return; }
-    if (mode === 'points' && hoverMd5) { const m = hoverMd5; hideHover(); showReport(m); return; }   /// click the hovered image (instant)
+    if (mode === 'points') {   /// click the hovered image / comment (instant, and exactly the one the hover showed)
+        const m = hoverTarget(map.mouseEventToContainerPoint(e));
+        if (m) { dropHover(); showReport(m); return; }
+    }
     if (mode === 'words' && wordClick(map.mouseEventToContainerPoint(e))) return;   /// click a word -> search from a comment that produced it
     const u = C().u3d[dataset], d = latlngToData(map.mouseEventToLatLng(e));
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
