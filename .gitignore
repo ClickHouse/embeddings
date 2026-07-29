@@ -1,0 +1,25 @@
+# credentials / secrets
+.ww_pw
+.env
+*.pw
+# logs
+*.log
+# per-shard done markers & embedding output dirs
+emb_web_img/
+emb_web_txt/
+emb_*/
+# UMAP working memmaps/caches
+umap_work/
+# python venvs & caches
+venv/
+venv_umap/
+venv_nemo/
+__pycache__/
+*.pyc
+# large local data / boundaries artifacts
+*.f32
+*.ids
+*.meta
+*.urls
+.hf_token
+*token*
