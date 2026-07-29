@@ -223,14 +223,16 @@ const U3D = {
 /// kind (image thumbnail vs comment). `lq` = 95th-percentile per-pixel density of the LINEAR projection at z=0
 /// (a deliberately LOWER quantile than q99): the linear cloud is far sparser/peakier than UMAP, so reusing uq99
 /// (~4x higher) left it too dim — a few dense-core pixels bright, everything else near-black. `lq` brightens it.
-/// HackerNews: 18 models (qwen3_8b excluded — no UMAP tables, 4096-d/1.1TiB); all unit-normalised so int8 uses
-/// x*sqrt(dim) companding; randomHadamardTransform does not pad any HN dim, so rdim == dim.
+/// HackerNews: 19 models incl. qwen3_8b (4096-d, 1.1 TiB; UMAP 2d/3d + QBit reps + linear coords added 2026-07);
+/// all unit-normalised so int8 uses x*sqrt(dim) companding; randomHadamardTransform does not pad any HN dim (all
+/// multiples of 128), so rdim == dim.
 /// KEY ORDER IS THE UI ORDER (buildModelSwitch reads Object.keys), sorted by MTEB quality, best first, with the
 /// bag-of-words baseline last. The annotated score is the MTEB English average where the model publishes one; the
 /// tracks are NOT strictly comparable — embeddinggemma reports MTEB(eng, v2), kalm the multilingual board (MMTEB),
 /// and the arctic pair are retrieval-tuned, so their headline is BEIR nDCG@10 and their overall average sits lower
 /// than their retrieval rank suggests. Ranks marked ~ are approximate, placed among their published neighbours.
 const HN_MODELS = {
+    qwen3_8b:       {dim:4096,rdim:4096,uq99:2090,lq:458},    /// ~70.6 MMTEB — Qwen3-Embedding-8B, 4096-d (largest, top-ranked)
     embeddinggemma: {dim:768,rdim:768,uq99:2789,lq:478},      /// 68.4 MTEB(eng, v2)
     jina_v3:        {dim:1024,rdim:1024,uq99:2088,lq:458},    /// 65.5 MTEB English
     kalm:           {dim:896,rdim:896,uq99:2959,lq:472},      /// 64.5 MMTEB
@@ -251,6 +253,7 @@ const HN_MODELS = {
     bow:            {dim:8192,rdim:8192,uq99:3473,lq:694},    /// not an MTEB model
 };
 const HN_U3D = {
+    qwen3_8b:       {cx:-9.3399,cy:-8.1952,cz:4.0019,s:13.319,clo:-7.3295,chi:19.1529,q99:5789},
     embeddinggemma: {cx:7.7635,cy:5.2072,cz:4.561,s:15.0837,clo:-5.1281,chi:18.7967,q99:6502},
     jina_v3:        {cx:-7.5054,cy:7.8504,cz:-6.1956,s:13.6053,clo:-4.8103,chi:21.2451,q99:6940},
     kalm:           {cx:-7.5525,cy:4.6083,cz:-5.5582,s:12.9469,clo:-12.9847,chi:3.1717,q99:5910},

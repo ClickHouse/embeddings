@@ -11,7 +11,7 @@ H=hvdvsqo23t.us-east-2.aws.clickhouse-staging.com
 CL(){ /home/ubuntu/embeddings/clickhouse-new client --host "$H" --secure --user default \
       --password "$CLICKHOUSE_CLOUD_EMBEDDINGS_PASSWORD" --query "$1" 2>&1 | grep -vi "unknown setting"; }
 MODELS="arctic_m arctic_xs bge_base bge_large bge_small bow e5_base e5_large e5_small \
-embeddinggemma granite_small gte_base gte_small jina_small jina_v3 kalm minilm nomic"
+embeddinggemma granite_small gte_base gte_small jina_small jina_v3 kalm minilm nomic qwen3_8b"
 
 echo "=== HN UMAP 2D enrich + constants  $(date +%T) ==="
 for m in $MODELS; do
