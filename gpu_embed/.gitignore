@@ -1,7 +1,15 @@
+# credentials / secrets — never commit
+.env
+.ww_pw
+*.pw
+.hf_token
+
 # runtime artifacts — never commit
 venv/
 venv_umap/
+venv_nemo/
 emb/
+emb_*/
 umap_work/
 __pycache__/
 *.pyc
@@ -10,3 +18,9 @@ __pycache__/
 prefixes*.txt
 finish_sig.*.txt
 clickhouse
+
+# large local data / boundaries artifacts
+*.f32
+*.ids
+*.meta
+*.urls
