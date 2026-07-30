@@ -670,8 +670,9 @@ function thumbMd5At(d) {
         if (!t || !t.coords || !t.el || !t.el._cells) continue;
         const ts = Math.pow(2, COORD_BITS - t.coords.z), tx0 = t.coords.x * ts, ty0 = t.coords.y * ts;
         if (d.x < tx0 || d.x >= tx0 + ts || d.y < ty0 || d.y >= ty0 + ts) continue;   /// click outside this tile
-        const cell = Math.floor(ts * 75 / TILE);
-        const px = Math.floor((d.x - tx0) / cell) * 75, py = Math.floor((d.y - ty0) / cell) * 75;
+        const CELL = C().thumbPx || 75;   /// must match thumbCellsSQL / renderThumbTile cell size (Photos 75, Web 64)
+        const cell = Math.floor(ts * CELL / TILE);
+        const px = Math.floor((d.x - tx0) / cell) * CELL, py = Math.floor((d.y - ty0) / cell) * CELL;
         return t.el._cells[px + ',' + py] || null;
     }
     return null;
