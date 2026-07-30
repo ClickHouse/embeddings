@@ -1439,16 +1439,40 @@ function commentCard(row) {
     return div;
 }
 let metaSeq = 0;
+/// Black 'NSFW' square (rendered once as a data URL) shown instead of the screenshot for NSFW web results.
+const NSFW_T = 0.5;   /// web_nsfw.nsfw above this -> hide the screenshot
+const NSFW_IMG = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 256;
+    const g = c.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, 256, 256);
+    g.fillStyle = '#f00'; g.font = 'bold 60px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('NSFW', 128, 128);
+    return c.toDataURL();
+})();
+/// Set the web preview <img> to the full screenshot — or, if the site is NSFW (web_nsfw.nsfw > NSFW_T), to the
+/// black 'NSFW' square WITHOUT ever requesting the screenshot. Sequenced via metaSeq so a newer hover wins.
+async function webPreview(url, seq, img) {
+    let s = 0;
+    try {
+        const sql = `SELECT nsfw FROM default.web_nsfw WHERE url = {u:String} LIMIT 1 FORMAT TSV`;
+        s = +(await (await fetch(chURL(`param_u=${encodeURIComponent(url)}`, USER_THUMBS), { method: 'POST', body: sql })).text()) || 0;
+    } catch (e) {}
+    if (seq !== metaSeq) return;                             /// a newer hover superseded this lookup
+    img.src = s > NSFW_T ? NSFW_IMG : fullImgURL(url);
+}
 function previewImg(md5) {
     if (isHN()) return previewComment(md5);
     document.getElementById('full-comment').style.display = 'none';
     document.getElementById('full-meta').style.display = '';
     const img = document.getElementById('full-img'); img.style.display = '';
-    img.src = fullImgURL(md5);
     document.getElementById('full').style.display = 'block';
-    if (corpus === 'web')                                    /// caption = clickable live-site link (key IS the url)
+    if (corpus === 'web') {                                  /// caption = clickable live-site link (key IS the url)
         document.getElementById('full-meta').innerHTML = `<a href="${esc(md5)}" target="_blank" rel="noopener">${esc(md5)}</a>`;
-    else loadMeta(md5);                                      /// Photos: author + license caption from yfcc_metadata
+        webPreview(md5, ++metaSeq, img);                     /// NSFW -> black 'NSFW' square; else the screenshot
+    } else {
+        img.src = fullImgURL(md5);
+        loadMeta(md5);                                       /// Photos: author + license caption from yfcc_metadata
+    }
 }
 /// HackerNews preview: the comment (author · date · text) with a link to the HN item, in the bottom-left card.
 async function previewComment(id) {
