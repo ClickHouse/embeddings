@@ -692,9 +692,22 @@ function fullURL(key) {
         : isHN() ? `https://news.ycombinator.com/item?id=${key}`
         : `${S3}/${key.slice(0,3)}/${key.slice(3,6)}/${key}.jpg`;
 }
-/// <img src> for the full/preview image: Photos -> the JPG; Web -> the 64px thumb (a full 1280^2 PNG render would
-/// hit the same arrayElement-replication blowup as SQL resize). The report header links to the live site instead.
-function fullImgURL(key) { return corpus === 'web' ? thumbURL(key) : fullURL(key); }
+/// <img src> for the full/preview image: Photos -> the JPG; Web -> a crisp full-page render of the screenshot.
+/// Explode the screenshot array with arrayJoin + arrayZip (scalar-indexing t[i] replicates the 4.9M-elem array
+/// per output pixel -> 56 GiB) and 2x box-downscale via GROUP BY to 640x640 (native 1280^2 = 1.6M rows would
+/// exceed the read-only user's 1M max_result_rows cap; 640^2 = 410k is safely under). Served server-side as PNG.
+function fullImgURL(key) {
+    if (corpus !== 'web') return fullURL(key);
+    const sql = `SELECT op % 640 AS x, intDiv(op, 640) AS y,
+            toUInt8(avgIf(v, ch = 0)) AS r, toUInt8(avgIf(v, ch = 1)) AS g, toUInt8(avgIf(v, ch = 2)) AS b
+        FROM (SELECT z.1 AS v, (z.2 - 1) % 3 AS ch,
+                     intDiv(intDiv(intDiv(z.2 - 1, 3), 1280), 2) * 640 + intDiv(intDiv(z.2 - 1, 3) % 1280, 2) AS op
+              FROM (SELECT arrayJoin(arrayZip(s, arrayEnumerate(s))) AS z
+                    FROM (SELECT screenshot AS s FROM default.web_screenshots WHERE url = {k:String} LIMIT 1)))
+        GROUP BY op ORDER BY op
+        FORMAT PNG SETTINGS output_format_image_width = 640, output_format_image_height = 640`;
+    return chURL(`default_format=PNG&use_query_cache=0&max_result_rows=1000000&param_k=${encodeURIComponent(key)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
+}
 
 /// ---- Map ----
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 22,
