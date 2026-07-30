@@ -273,15 +273,40 @@ const HN_U3D = {
     minilm:         {cx:-5.6794,cy:8.5372,cz:-7.7432,s:14.5927,clo:-13.5008,chi:11.0106,q99:8536},
     bow:            {cx:1.3705,cy:1.1665,cz:-3.4653,s:24.0288,clo:-16.7225,chi:22.6358,q99:21040},
 };
+/// WonderfulWeb: website screenshots + text, dual modality (image + text embedding models), keyed by url.
+/// All dims multiples of 128 -> rdim==dim. uq99 = UMAP-2D z=0 per-pixel density; u3d = 3D render constants.
+/// No linear projection (emb tables carry only url+embedding+QBit reps). See [[web-corpus]].
+const WEB_MODELS = {
+    img_siglip2:   {dim:1152, rdim:1152, uq99:3331},
+    img_clip:      {dim:768,  rdim:768,  uq99:2980},
+    img_nomic:     {dim:768,  rdim:768,  uq99:6692},
+    txt_bge_large: {dim:1024, rdim:1024, uq99:4791},
+    txt_e5_large:  {dim:1024, rdim:1024, uq99:7178},
+    txt_jina_v3:   {dim:1024, rdim:1024, uq99:51953},
+    txt_nomic:     {dim:768,  rdim:768,  uq99:22953},
+};
+const WEB_U3D = {
+    img_siglip2:   {cx:7.106,  cy:-6.4938, cz:1.4092,  s:30.4989, clo:-19.3464, chi:22.3654, q99:10047},
+    img_clip:      {cx:-2.8565,cy:-5.4591, cz:-3.7369, s:26.2157, clo:-21.3861, chi:31.2087, q99:9187},
+    img_nomic:     {cx:-3.7954,cy:-2.0062, cz:-1.335,  s:25.4857, clo:-30.3606, chi:23.8649, q99:7084},
+    txt_bge_large: {cx:3.2892, cy:-0.8217, cz:-7.5113, s:24.9598, clo:-21.7781, chi:26.4278, q99:8069},
+    txt_e5_large:  {cx:-6.3776,cy:-7.9216, cz:-8.549,  s:26.7152, clo:-43.9608, chi:24.8616, q99:9113},
+    txt_jina_v3:   {cx:-8.9738,cy:-7.3175, cz:1.3861,  s:26.8537, clo:-27.5893, chi:18.3824, q99:9003},
+    txt_nomic:     {cx:-6.9059,cy:-11.1467,cz:-3.797,  s:30.773,  clo:-37.0151, chi:21.2236, q99:9692},
+};
 const CORPORA = {
     photos: { label: 'Photos', key: 'md5', keyType: 'String', models: DATASETS, u3d: U3D, def: 'siglip2',
-        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image',
+        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image', thumb: THUMBS, thumbPx: 75,
         attrib: 'data: Multimedia Commons, CC Licenses',   /// data clause of the map attribution legend (setAttribution)
         emb: m => `mmcommons.emb_${m}`, u2: m => `mmcommons.umap_${m}_2d`, u3: m => `mmcommons.umap_${m}_3d` },
     hn: { label: 'HackerNews', key: 'id', keyType: 'UInt32', models: HN_MODELS, u3d: HN_U3D, def: 'nomic',
         projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'words'], render: 'comment',
         attrib: 'Data: Hacker News',
         emb: m => `default.hackernews_embeddings_${m}`, u2: m => `default.hackernews_umap_${m}_2d`, u3: m => `default.hackernews_umap_${m}_3d` },
+    web: { label: 'Web', key: 'url', keyType: 'String', models: WEB_MODELS, u3d: WEB_U3D, def: 'img_siglip2',
+        projs: ['UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'web', thumb: 'default.web_thumbs', thumbPx: 64,   /// screenshots (thumbs) + on-demand text; QBit search
+        attrib: 'Data: WonderfulWeb',
+        emb: m => `default.web_emb_${m}`, u2: m => `default.web_umap_${m}_2d`, u3: m => `default.web_umap_${m}_3d` },
 };
 const C = () => CORPORA[corpus];        /// current corpus config
 const curModel = () => C().models[dataset];
@@ -370,13 +395,13 @@ function tileSQL(table, q99) {
 }
 /// One representative md5 per 75px cell for the thumbnails overlay.
 function thumbCellsSQL(table) {
-    const CELL = 75; const { xc, yc } = projCfg();
+    const CELL = C().thumbPx || 75; const { xc, yc } = projCfg();
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
         intDiv(ts * ${CELL}, ${TILE}) AS cell
-    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(k, rnd) AS md5
     FROM (
-        SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
+        SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy, ${KEY()} AS k, cityHash64(${KEY()}) AS rnd
         FROM ${table}
         WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
     )
@@ -385,16 +410,16 @@ function thumbCellsSQL(table) {
 }
 /// 3D thumbnail cells: one representative md5 per 75px cell of the ROTATED projection (full scan, like tileSQL3d).
 function thumbCellsSQL3d(table) {
-    const CELL = 75, u = C().u3d[dataset];
+    const CELL = C().thumbPx || 75, u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
     const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`, PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, intDiv(ts * ${CELL}, ${TILE}) AS cell
-    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(k, rnd) AS md5
     FROM (
-        SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
-        FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM ${table})
+        SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy, k, cityHash64(k) AS rnd
+        FROM (SELECT ${KEY()} AS k, ${PX} AS PX, ${PY} AS PY FROM ${table})
         WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
     )
     GROUP BY cx, cy
@@ -512,7 +537,8 @@ async function renderThumbTile(coords, canvas) {
         let o = 0; const cellMap = {};   /// 'px,py' -> md5 of the drawn thumbnail, for exact click lookup (no query)
         while (o + 4 < cells.length) {
             const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
-            const len = cells[o++];               /// md5 <= 127 bytes -> single varint byte
+            let len = 0, sh = 0, bb;              /// LEB128 varint (md5 fits 1 byte; urls can exceed 127 -> multi-byte)
+            do { bb = cells[o++]; len |= (bb & 0x7f) << sh; sh += 7; } while (bb & 0x80);
             const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
             cellMap[px + ',' + py] = md5;
             drawThumb(ctx, px, py, md5);
@@ -522,8 +548,9 @@ async function renderThumbTile(coords, canvas) {
     } catch (e) { showError(String(e).slice(0, 500)); }
 }
 function drawThumb(ctx, px, py, md5) {
+    const sz = C().thumbPx || 75;
     const im = new Image();
-    im.onload = () => ctx.drawImage(im, px, py, 75, 75);
+    im.onload = () => ctx.drawImage(im, px, py, sz, sz);
     im.src = thumbURL(md5);
 }
 /// HackerNews "words" word cloud: query one word per grid cell over the whole VIEWPORT, then dedup —
@@ -649,14 +676,25 @@ function thumbMd5At(d) {
     }
     return null;
 }
-function thumbURL(md5) {
-    const sql = `WITH (SELECT thumb FROM ${THUMBS} WHERE md5 = {md5:String}) AS t
-        SELECT (number % 75) AS x, intDiv(number, 75) AS y, t[number*3+1] AS r, t[number*3+2] AS g, t[number*3+3] AS b
-        FROM numbers(75*75) ORDER BY y, x
-        FORMAT PNG SETTINGS output_format_image_width = 75, output_format_image_height = 75`;
-    return chURL(`default_format=PNG&param_md5=${encodeURIComponent(md5)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
+/// Render one stored raw-RGB thumbnail as a PNG (server-side, via FORMAT PNG). Corpus-driven: Photos=75px from
+/// mmcommons.image_thumbs2_fast keyed by md5; Web=64px from default.web_thumbs keyed by url. `key` is opaque.
+function thumbURL(key) {
+    const px = C().thumbPx || 75;
+    const sql = `WITH (SELECT thumb FROM ${C().thumb} WHERE ${KEY()} = {k:String}) AS t
+        SELECT (number % ${px}) AS x, intDiv(number, ${px}) AS y, t[number*3+1] AS r, t[number*3+2] AS g, t[number*3+3] AS b
+        FROM numbers(${px}*${px}) ORDER BY y, x
+        FORMAT PNG SETTINGS output_format_image_width = ${px}, output_format_image_height = ${px}`;
+    return chURL(`default_format=PNG&param_k=${encodeURIComponent(key)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
 }
-function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}.jpg`; }
+/// Link target for a result: Photos -> the full JPG on S3; Web -> the live website (key IS the url); HN -> the item.
+function fullURL(key) {
+    return corpus === 'web' ? key
+        : isHN() ? `https://news.ycombinator.com/item?id=${key}`
+        : `${S3}/${key.slice(0,3)}/${key.slice(3,6)}/${key}.jpg`;
+}
+/// <img src> for the full/preview image: Photos -> the JPG; Web -> the 64px thumb (a full 1280^2 PNG render would
+/// hit the same arrayElement-replication blowup as SQL resize). The report header links to the live site instead.
+function fullImgURL(key) { return corpus === 'web' ? thumbURL(key) : fullURL(key); }
 
 /// ---- Map ----
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 22,
@@ -1018,7 +1056,7 @@ function showReport(md5) {
     document.getElementById('grid').classList.toggle('hn', isHN());   /// comment-list layout vs thumbnail grid
     document.getElementById('rc-query').innerHTML = isHN()
         ? `<a href="https://news.ycombinator.com/item?id=${curReport}" target=_blank>comment #${curReport}</a> · ${dataset}`
-        : `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
+        : `<a href="${esc(fullURL(curReport))}" target=_blank rel=noopener>${esc(curReport)}</a> · ${dataset}`;
     buildRepScales();
     fitPanelWidth();                                         /// size the panel to a whole number of columns
 
@@ -1081,7 +1119,7 @@ function switchRep() {
 /// Fetch user_tags for the current top-K results and render a frequency-sized tag cloud over the map.
 async function updateTagCloud() {
     const el = document.getElementById('tagcloud');
-    if (isHN()) { el.style.display = 'none'; return; }   /// HackerNews comments have no user tags
+    if (corpus !== 'photos') { el.style.display = 'none'; return; }   /// only Photos has user tags (HN/Web don't)
     const md5s = repMd5s.slice(0, 1000);
     if (!reportActive || !md5s.length) { el.style.display = 'none'; return; }
     const seq = ++tagSeq;
@@ -1250,7 +1288,9 @@ async function runSimilar(more) {
         /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
         /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return id + x,y and then
         /// fetch author/text/date for the ranked ids from default.hackernews (uniform across models incl. bow).
-        const sel = isHN()
+        const sel = corpus === 'web'
+            ? `toString(url) AS md5`              /// web emb tables have no coords; the overlay repositions via umapCoords (UMAP/3D only)
+            : isHN()
             ? `toString(${KEY()}) AS md5, x, y`   /// author/text/date fetched from default.hackernews after ranking (works for models w/o inline meta, e.g. bow)
             : `md5, x, y`;
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
@@ -1368,9 +1408,11 @@ function previewImg(md5) {
     document.getElementById('full-comment').style.display = 'none';
     document.getElementById('full-meta').style.display = '';
     const img = document.getElementById('full-img'); img.style.display = '';
-    img.src = fullURL(md5);
+    img.src = fullImgURL(md5);
     document.getElementById('full').style.display = 'block';
-    loadMeta(md5);                                           /// author + license caption from yfcc_metadata
+    if (corpus === 'web')                                    /// caption = clickable live-site link (key IS the url)
+        document.getElementById('full-meta').innerHTML = `<a href="${esc(md5)}" target="_blank" rel="noopener">${esc(md5)}</a>`;
+    else loadMeta(md5);                                      /// Photos: author + license caption from yfcc_metadata
 }
 /// HackerNews preview: the comment (author · date · text) with a link to the HN item, in the bottom-left card.
 async function previewComment(id) {
