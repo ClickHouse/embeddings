@@ -273,15 +273,40 @@ const HN_U3D = {
     minilm:         {cx:-5.6794,cy:8.5372,cz:-7.7432,s:14.5927,clo:-13.5008,chi:11.0106,q99:8536},
     bow:            {cx:1.3705,cy:1.1665,cz:-3.4653,s:24.0288,clo:-16.7225,chi:22.6358,q99:21040},
 };
+/// WonderfulWeb: website screenshots + text, dual modality (image + text embedding models), keyed by url.
+/// All dims multiples of 128 -> rdim==dim. uq99 = UMAP-2D z=0 per-pixel density; u3d = 3D render constants.
+/// No linear projection (emb tables carry only url+embedding+QBit reps). See [[web-corpus]].
+const WEB_MODELS = {
+    img_siglip2:   {dim:1152, rdim:1152, uq99:3331,  lq:238},
+    img_clip:      {dim:768,  rdim:768,  uq99:2980,  lq:261},
+    img_nomic:     {dim:768,  rdim:768,  uq99:6692,  lq:353},
+    txt_bge_large: {dim:1024, rdim:1024, uq99:4791,  lq:209},
+    txt_e5_large:  {dim:1024, rdim:1024, uq99:7178,  lq:211},
+    txt_jina_v3:   {dim:1024, rdim:1024, uq99:51953, lq:209},
+    txt_nomic:     {dim:768,  rdim:768,  uq99:22953, lq:219},
+};
+const WEB_U3D = {
+    img_siglip2:   {cx:7.106,  cy:-6.4938, cz:1.4092,  s:30.4989, clo:-19.3464, chi:22.3654, q99:10047},
+    img_clip:      {cx:-2.8565,cy:-5.4591, cz:-3.7369, s:26.2157, clo:-21.3861, chi:31.2087, q99:9187},
+    img_nomic:     {cx:-3.7954,cy:-2.0062, cz:-1.335,  s:25.4857, clo:-30.3606, chi:23.8649, q99:7084},
+    txt_bge_large: {cx:3.2892, cy:-0.8217, cz:-7.5113, s:24.9598, clo:-21.7781, chi:26.4278, q99:8069},
+    txt_e5_large:  {cx:-6.3776,cy:-7.9216, cz:-8.549,  s:26.7152, clo:-43.9608, chi:24.8616, q99:9113},
+    txt_jina_v3:   {cx:-8.9738,cy:-7.3175, cz:1.3861,  s:26.8537, clo:-27.5893, chi:18.3824, q99:9003},
+    txt_nomic:     {cx:-6.9059,cy:-11.1467,cz:-3.797,  s:30.773,  clo:-37.0151, chi:21.2236, q99:9692},
+};
 const CORPORA = {
     photos: { label: 'Photos', key: 'md5', keyType: 'String', models: DATASETS, u3d: U3D, def: 'siglip2',
-        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image',
+        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'image', thumb: THUMBS, thumbPx: 75,
         attrib: 'data: Multimedia Commons, CC Licenses',   /// data clause of the map attribution legend (setAttribution)
         emb: m => `mmcommons.emb_${m}`, u2: m => `mmcommons.umap_${m}_2d`, u3: m => `mmcommons.umap_${m}_3d` },
     hn: { label: 'HackerNews', key: 'id', keyType: 'UInt32', models: HN_MODELS, u3d: HN_U3D, def: 'nomic',
         projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'words'], render: 'comment',
         attrib: 'Data: Hacker News',
         emb: m => `default.hackernews_embeddings_${m}`, u2: m => `default.hackernews_umap_${m}_2d`, u3: m => `default.hackernews_umap_${m}_3d` },
+    web: { label: 'Web', key: 'url', keyType: 'String', models: WEB_MODELS, u3d: WEB_U3D, def: 'img_siglip2',
+        projs: ['linear', 'UMAP', 'UMAP 3D'], modes: ['points', 'thumbs'], render: 'web', thumb: 'default.web_thumbs', thumbPx: 64,   /// screenshots (thumbs) + on-demand text; QBit search
+        attrib: 'Data: WonderfulWeb',
+        emb: m => `default.web_emb_${m}`, u2: m => `default.web_umap_${m}_2d`, u3: m => `default.web_umap_${m}_3d` },
 };
 const C = () => CORPORA[corpus];        /// current corpus config
 const curModel = () => C().models[dataset];
@@ -346,7 +371,28 @@ function fmtBytes(n) { if (!isFinite(n)) return '—'; const u = ['B', 'KiB', 'M
 /// ---- Point-cloud tile query ----
 /// Table name comes from our own config, so it is interpolated (not a {:Identifier} param,
 /// which would wrap the dotted db.table in backticks as a single identifier).
-function tileSQL(table, q99) {
+/// Hue is mapped from the colour coordinate over its [1%,99%] percentile range (not min/max): many UMAP layouts
+/// pack colour into a narrow band with a few outliers, which min/max mapping renders as one flat hue. Computed
+/// once per (corpus,model,proj) and cached. 2D uses the mapped hue col (mz/z, /65535); 3D uses raw `color`.
+const hueRanges = {};
+let curHue = { lo: 0, hi: 1 };   /// resolved range for the current cfg (also used by the client-side 3D rotation preview)
+function ensureHueRange(cfg) {
+    const key = `${corpus}|${dataset}|${proj}`;
+    if (hueRanges[key]) { hueRanges[key].then(h => curHue = h); return hueRanges[key]; }
+    const col = cfg.three ? 'color' : cfg.zc, norm = cfg.three ? 1 : 65535;
+    hueRanges[key] = (async () => {
+        try {
+            const txt = await (await chQuery(`SELECT quantile(0.01)(${col}), quantile(0.99)(${col}) FROM ${cfg.table} FORMAT JSONCompactEachRow`, {}, 'JSONCompactEachRow', 'use_query_cache=0')).text();
+            const [a, b] = JSON.parse((txt.trim().split('\n')[0]) || '[0,1]');
+            let lo = a / norm, hi = b / norm;
+            if (!(hi > lo)) { lo = 0; hi = 1; }
+            return { lo, hi };
+        } catch (e) { return { lo: 0, hi: 1 }; }
+    })();
+    hueRanges[key].then(h => curHue = h);
+    return hueRanges[key];
+}
+function tileSQL(table, q99, lo, hi) {
     /// Fixed brightness normalization: expected q99 per-pixel density / 4^zoom (each 2x zoom
     /// quarters the per-pixel area). q is a constant per tile -> brightness is consistent across
     /// tiles and zoom levels (adsb-style), instead of a per-tile quantile.
@@ -357,7 +403,7 @@ function tileSQL(table, q99) {
     SELECT px, py,
         tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
     FROM (
-        SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
+        SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, least(1., greatest(0., (hue - (${lo})) / ((${hi}) - (${lo})))) * 360)) AS c
         FROM (
             SELECT toUInt16(intDiv((${xc} - tx0) * ${TILE}, ts)) AS px,
                    toUInt16(intDiv((${yc} - ty0) * ${TILE}, ts)) AS py,
@@ -370,13 +416,13 @@ function tileSQL(table, q99) {
 }
 /// One representative md5 per 75px cell for the thumbnails overlay.
 function thumbCellsSQL(table) {
-    const CELL = 75; const { xc, yc } = projCfg();
+    const CELL = C().thumbPx || 75; const { xc, yc } = projCfg();
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
         intDiv(ts * ${CELL}, ${TILE}) AS cell
-    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(k, rnd) AS md5
     FROM (
-        SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
+        SELECT intDiv(${xc} - tx0, cell) AS cx, intDiv(${yc} - ty0, cell) AS cy, ${KEY()} AS k, cityHash64(${KEY()}) AS rnd
         FROM ${table}
         WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
     )
@@ -385,16 +431,16 @@ function thumbCellsSQL(table) {
 }
 /// 3D thumbnail cells: one representative md5 per 75px cell of the ROTATED projection (full scan, like tileSQL3d).
 function thumbCellsSQL3d(table) {
-    const CELL = 75, u = C().u3d[dataset];
+    const CELL = C().thumbPx || 75, u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`, ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;
     const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`, PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, intDiv(ts * ${CELL}, ${TILE}) AS cell
-    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(md5, rnd) AS md5
+    SELECT (cx * ${CELL})::UInt16 AS px, (cy * ${CELL})::UInt16 AS py, argMin(k, rnd) AS md5
     FROM (
-        SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy, md5, cityHash64(md5) AS rnd
-        FROM (SELECT md5, ${PX} AS PX, ${PY} AS PY FROM ${table})
+        SELECT intDiv(PX - tx0, cell) AS cx, intDiv(PY - ty0, cell) AS cy, k, cityHash64(k) AS rnd
+        FROM (SELECT ${KEY()} AS k, ${PX} AS PX, ${PY} AS PY FROM ${table})
         WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
     )
     GROUP BY cx, cy
@@ -441,14 +487,14 @@ function wordViewSQL3d(table) {
 /// ---- Rendering ----
 /// UMAP 3D: orthographic projection of the rotated 3D cloud into the 2^32 square, aggregated per tile pixel.
 /// Projection depends on rotation -> no morton index -> full scan (~1s). rx,ry = rows 0,1 of the view matrix R.
-function tileSQL3d(table, q99) {
+function tileSQL3d(table, q99, lo, hi) {
     const u = C().u3d[dataset];
     const nx = `((x-(${u.cx}))/${u.s})`, ny = `((y-(${u.cy}))/${u.s})`, nz = `((z-(${u.cz}))/${u.s})`;
     const rx = `({r0:Float64}*${nx}+{r1:Float64}*${ny}+{r2:Float64}*${nz})`;   /// screen x = row 0 of R · (nx,ny,nz)
     const ry = `({r3:Float64}*${nx}+{r4:Float64}*${ny}+{r5:Float64}*${nz})`;   /// screen y = row 1 of R · (nx,ny,nz)
     const PX = `toUInt32(least(1.,greatest(0.,${rx}*${U3D_PS}+0.5))*4294967295)`;
     const PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
-    const hue = `least(1.,greatest(0.,(color-(${u.clo}))/(${u.chi}-(${u.clo}))))`;
+    const hue = `least(1.,greatest(0.,(color-(${lo}))/((${hi})-(${lo}))))`;   /// [1%,99%] colour range (not u.clo/u.chi = min/max)
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, greatest(${q99} / pow(4, {z:UInt8}), ${Q_FLOOR}) AS q
     SELECT px, py, tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
@@ -481,9 +527,10 @@ async function renderTile(coords, canvas) {
     const ctx = canvas.getContext('2d', { colorSpace: CANVAS_CS });
     const seq = canvas._rseq = (canvas._rseq || 0) + 1;   /// discard a stale render if a newer one for this tile started
     try {
+        const hr = await ensureHueRange(cfg);   /// [1%,99%] colour range for hue (cached per corpus/model/proj)
         let sql;
-        if (cfg.three) { Object.assign(p, rotParams()); sql = tileSQL3d(table, q99); }   /// UMAP 3D: rotated projection
-        else sql = tileSQL(table, q99);
+        if (cfg.three) { Object.assign(p, rotParams()); sql = tileSQL3d(table, q99, hr.lo, hr.hi); }   /// UMAP 3D: rotated projection
+        else sql = tileSQL(table, q99, hr.lo, hr.hi);
         const buf = await (await chQuery(sql, p)).arrayBuffer();
         if (canvas._rseq !== seq) return;                 /// superseded -> keep the current image (no blank / no stale overwrite)
         const dv = new DataView(buf);
@@ -512,7 +559,8 @@ async function renderThumbTile(coords, canvas) {
         let o = 0; const cellMap = {};   /// 'px,py' -> md5 of the drawn thumbnail, for exact click lookup (no query)
         while (o + 4 < cells.length) {
             const px = cells[o] | (cells[o+1]<<8), py = cells[o+2] | (cells[o+3]<<8); o += 4;
-            const len = cells[o++];               /// md5 <= 127 bytes -> single varint byte
+            let len = 0, sh = 0, bb;              /// LEB128 varint (md5 fits 1 byte; urls can exceed 127 -> multi-byte)
+            do { bb = cells[o++]; len |= (bb & 0x7f) << sh; sh += 7; } while (bb & 0x80);
             const md5 = new TextDecoder().decode(cells.subarray(o, o + len)); o += len;
             cellMap[px + ',' + py] = md5;
             drawThumb(ctx, px, py, md5);
@@ -522,8 +570,9 @@ async function renderThumbTile(coords, canvas) {
     } catch (e) { showError(String(e).slice(0, 500)); }
 }
 function drawThumb(ctx, px, py, md5) {
+    const sz = C().thumbPx || 75;
     const im = new Image();
-    im.onload = () => ctx.drawImage(im, px, py, 75, 75);
+    im.onload = () => ctx.drawImage(im, px, py, sz, sz);
     im.src = thumbURL(md5);
 }
 /// HackerNews "words" word cloud: query one word per grid cell over the whole VIEWPORT, then dedup —
@@ -643,20 +692,45 @@ function thumbMd5At(d) {
         if (!t || !t.coords || !t.el || !t.el._cells) continue;
         const ts = Math.pow(2, COORD_BITS - t.coords.z), tx0 = t.coords.x * ts, ty0 = t.coords.y * ts;
         if (d.x < tx0 || d.x >= tx0 + ts || d.y < ty0 || d.y >= ty0 + ts) continue;   /// click outside this tile
-        const cell = Math.floor(ts * 75 / TILE);
-        const px = Math.floor((d.x - tx0) / cell) * 75, py = Math.floor((d.y - ty0) / cell) * 75;
+        const CELL = C().thumbPx || 75;   /// must match thumbCellsSQL / renderThumbTile cell size (Photos 75, Web 64)
+        const cell = Math.floor(ts * CELL / TILE);
+        const px = Math.floor((d.x - tx0) / cell) * CELL, py = Math.floor((d.y - ty0) / cell) * CELL;
         return t.el._cells[px + ',' + py] || null;
     }
     return null;
 }
-function thumbURL(md5) {
-    const sql = `WITH (SELECT thumb FROM ${THUMBS} WHERE md5 = {md5:String}) AS t
-        SELECT (number % 75) AS x, intDiv(number, 75) AS y, t[number*3+1] AS r, t[number*3+2] AS g, t[number*3+3] AS b
-        FROM numbers(75*75) ORDER BY y, x
-        FORMAT PNG SETTINGS output_format_image_width = 75, output_format_image_height = 75`;
-    return chURL(`default_format=PNG&param_md5=${encodeURIComponent(md5)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
+/// Render one stored raw-RGB thumbnail as a PNG (server-side, via FORMAT PNG). Corpus-driven: Photos=75px from
+/// mmcommons.image_thumbs2_fast keyed by md5; Web=64px from default.web_thumbs keyed by url. `key` is opaque.
+function thumbURL(key) {
+    const px = C().thumbPx || 75;
+    const sql = `WITH (SELECT thumb FROM ${C().thumb} WHERE ${KEY()} = {k:String}) AS t
+        SELECT (number % ${px}) AS x, intDiv(number, ${px}) AS y, t[number*3+1] AS r, t[number*3+2] AS g, t[number*3+3] AS b
+        FROM numbers(${px}*${px}) ORDER BY y, x
+        FORMAT PNG SETTINGS output_format_image_width = ${px}, output_format_image_height = ${px}`;
+    return chURL(`default_format=PNG&param_k=${encodeURIComponent(key)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
 }
-function fullURL(md5) { return `${S3}/${md5.slice(0,3)}/${md5.slice(3,6)}/${md5}.jpg`; }
+/// Link target for a result: Photos -> the full JPG on S3; Web -> the live website (key IS the url); HN -> the item.
+function fullURL(key) {
+    return corpus === 'web' ? key
+        : isHN() ? `https://news.ycombinator.com/item?id=${key}`
+        : `${S3}/${key.slice(0,3)}/${key.slice(3,6)}/${key}.jpg`;
+}
+/// <img src> for the full/preview image: Photos -> the JPG; Web -> a crisp full-page render of the screenshot.
+/// Explode the screenshot array with arrayJoin + arrayZip (scalar-indexing t[i] replicates the 4.9M-elem array
+/// per output pixel -> 56 GiB) and 2x box-downscale via GROUP BY to 640x640 (native 1280^2 = 1.6M rows would
+/// exceed the read-only user's 1M max_result_rows cap; 640^2 = 410k is safely under). Served server-side as PNG.
+function fullImgURL(key) {
+    if (corpus !== 'web') return fullURL(key);
+    const sql = `SELECT op % 640 AS x, intDiv(op, 640) AS y,
+            toUInt8(avgIf(v, ch = 0)) AS r, toUInt8(avgIf(v, ch = 1)) AS g, toUInt8(avgIf(v, ch = 2)) AS b
+        FROM (SELECT z.1 AS v, (z.2 - 1) % 3 AS ch,
+                     intDiv(intDiv(intDiv(z.2 - 1, 3), 1280), 2) * 640 + intDiv(intDiv(z.2 - 1, 3) % 1280, 2) AS op
+              FROM (SELECT arrayJoin(arrayZip(s, arrayEnumerate(s))) AS z
+                    FROM (SELECT screenshot AS s FROM default.web_screenshots WHERE url = {k:String} LIMIT 1)))
+        GROUP BY op ORDER BY op
+        FORMAT PNG SETTINGS output_format_image_width = 640, output_format_image_height = 640`;
+    return chURL(`default_format=PNG&use_query_cache=0&max_result_rows=1000000&param_k=${encodeURIComponent(key)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
+}
 
 /// ---- Map ----
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 22,
@@ -1018,7 +1092,7 @@ function showReport(md5) {
     document.getElementById('grid').classList.toggle('hn', isHN());   /// comment-list layout vs thumbnail grid
     document.getElementById('rc-query').innerHTML = isHN()
         ? `<a href="https://news.ycombinator.com/item?id=${curReport}" target=_blank>comment #${curReport}</a> · ${dataset}`
-        : `<a href="${fullURL(curReport)}" target=_blank>${curReport}</a> · ${dataset}`;
+        : `<a href="${esc(fullURL(curReport))}" target=_blank rel=noopener>${esc(curReport)}</a> · ${dataset}`;
     buildRepScales();
     fitPanelWidth();                                         /// size the panel to a whole number of columns
 
@@ -1081,7 +1155,7 @@ function switchRep() {
 /// Fetch user_tags for the current top-K results and render a frequency-sized tag cloud over the map.
 async function updateTagCloud() {
     const el = document.getElementById('tagcloud');
-    if (isHN()) { el.style.display = 'none'; return; }   /// HackerNews comments have no user tags
+    if (corpus !== 'photos') { el.style.display = 'none'; return; }   /// only Photos has user tags (HN/Web don't)
     const md5s = repMd5s.slice(0, 1000);
     if (!reportActive || !md5s.length) { el.style.display = 'none'; return; }
     const seq = ++tagSeq;
@@ -1250,7 +1324,9 @@ async function runSimilar(more) {
         /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
         /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return id + x,y and then
         /// fetch author/text/date for the ranked ids from default.hackernews (uniform across models incl. bow).
-        const sel = isHN()
+        const sel = corpus === 'web'
+            ? `toString(url) AS md5`              /// web emb tables have no coords; the overlay repositions via umapCoords (UMAP/3D only)
+            : isHN()
             ? `toString(${KEY()}) AS md5, x, y`   /// author/text/date fetched from default.hackernews after ranking (works for models w/o inline meta, e.g. bow)
             : `md5, x, y`;
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
@@ -1363,14 +1439,40 @@ function commentCard(row) {
     return div;
 }
 let metaSeq = 0;
+/// Black 'NSFW' square (rendered once as a data URL) shown instead of the screenshot for NSFW web results.
+const NSFW_T = 0.5;   /// web_nsfw.nsfw above this -> hide the screenshot
+const NSFW_IMG = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 256;
+    const g = c.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, 256, 256);
+    g.fillStyle = '#f00'; g.font = 'bold 60px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('NSFW', 128, 128);
+    return c.toDataURL();
+})();
+/// Set the web preview <img> to the full screenshot — or, if the site is NSFW (web_nsfw.nsfw > NSFW_T), to the
+/// black 'NSFW' square WITHOUT ever requesting the screenshot. Sequenced via metaSeq so a newer hover wins.
+async function webPreview(url, seq, img) {
+    let s = 0;
+    try {
+        const sql = `SELECT nsfw FROM default.web_nsfw WHERE url = {u:String} LIMIT 1 FORMAT TSV`;
+        s = +(await (await fetch(chURL(`param_u=${encodeURIComponent(url)}`, USER_THUMBS), { method: 'POST', body: sql })).text()) || 0;
+    } catch (e) {}
+    if (seq !== metaSeq) return;                             /// a newer hover superseded this lookup
+    img.src = s > NSFW_T ? NSFW_IMG : fullImgURL(url);
+}
 function previewImg(md5) {
     if (isHN()) return previewComment(md5);
     document.getElementById('full-comment').style.display = 'none';
     document.getElementById('full-meta').style.display = '';
     const img = document.getElementById('full-img'); img.style.display = '';
-    img.src = fullURL(md5);
     document.getElementById('full').style.display = 'block';
-    loadMeta(md5);                                           /// author + license caption from yfcc_metadata
+    if (corpus === 'web') {                                  /// caption = clickable live-site link (key IS the url)
+        document.getElementById('full-meta').innerHTML = `<a href="${esc(md5)}" target="_blank" rel="noopener">${esc(md5)}</a>`;
+        webPreview(md5, ++metaSeq, img);                     /// NSFW -> black 'NSFW' square; else the screenshot
+    } else {
+        img.src = fullImgURL(md5);
+        loadMeta(md5);                                       /// Photos: author + license caption from yfcc_metadata
+    }
 }
 /// HackerNews preview: the comment (author · date · text) with a link to the HN item, in the bottom-left card.
 async function previewComment(id) {
@@ -1570,7 +1672,9 @@ async function loadPreview(ds) {
     if (previewData[pk]) return;                  /// already loaded or loading
     previewData[pk] = 'loading';
     try {
-        const u = C().u3d[ds], crange = u.chi - u.clo;
+        const u = C().u3d[ds];
+        let hlo = u.clo, hhi = u.chi;   /// hue range: use the [1%,99%] percentile range for the current dataset (matches the tiles)
+        if (ds === dataset) { const hr = await ensureHueRange(projCfg()); hlo = hr.lo; hhi = hr.hi; }
         /// x,y,z,color (fixed 16 bytes) + key (varint-length string; toString() so HN's id UInt32 reads like an md5)
         const buf = await (await chQuery(`SELECT x, y, z, color, toString(${KEY()}) FROM ${C().u3(ds)} LIMIT ${PREVIEW_N} FORMAT RowBinary`, {})).arrayBuffer();
         const dv = new DataView(buf), bytes = new Uint8Array(buf), td = new TextDecoder();
@@ -1583,7 +1687,7 @@ async function loadPreview(ds) {
             if (o + len > buf.byteLength) break;
             md5.push(td.decode(bytes.subarray(o, o + len))); o += len;
             nx.push((x - u.cx) / u.s); ny.push((y - u.cy) / u.s); nz.push((z - u.cz) / u.s);   /// same normalization as tileSQL3d
-            const hue = Math.max(0, Math.min(1, (c - u.clo) / crange)), rgb = oklchToRGB(0.75, 0.16, hue * 360);
+            const hue = Math.max(0, Math.min(1, (c - hlo) / (hhi - hlo))), rgb = oklchToRGB(0.75, 0.16, hue * 360);
             cr.push(rgb[0] * PREVIEW_ALPHA); cg.push(rgb[1] * PREVIEW_ALPHA); cb.push(rgb[2] * PREVIEW_ALPHA);
         }
         previewData[pk] = { n: md5.length, md5,
