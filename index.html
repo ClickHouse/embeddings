@@ -1342,10 +1342,11 @@ async function runSimilar(more) {
         /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
         /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return id + x,y and then
         /// fetch author/text/date for the ranked ids from default.hackernews (uniform across models incl. bow).
-        const sel = corpus === 'web'
-            ? `toString(url) AS md5`              /// web emb tables have no coords; the overlay repositions via umapCoords (UMAP/3D only)
-            : isHN()
-            ? `toString(${KEY()}) AS md5, x, y`   /// author/text/date fetched from default.hackernews after ranking (works for models w/o inline meta, e.g. bow)
+        /// x,y = linear-projection coords, used to place the top-K markers on the map (UMAP/3D re-look them up via
+        /// umapCoords/umap3dCoords). Web tables got x,y,z from web_linear_enrich.sh; without them the linear overlay
+        /// had NaN positions -> no markers -> no hover preview on the map while a report was open.
+        const sel = isHN() || corpus === 'web'
+            ? `toString(${KEY()}) AS md5, x, y`   /// HN: author/text/date fetched from default.hackernews after ranking (works for models w/o inline meta, e.g. bow)
             : `md5, x, y`;
         const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
             SELECT ${sel} FROM ${table}
