@@ -344,8 +344,13 @@ const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
 const repMaxDims = () => qbitInfo().dim;
 
 /// ---- ClickHouse HTTP ----
+/// Every query goes through here. query_cache_nondeterministic_function_handling=save: the users' profiles keep the
+/// query cache ON, and ClickHouse refuses (error 704) to cache a query that uses a function it deems non-deterministic
+/// -- arrayJoin is one (token clouds, hover tags, the screenshot render, HN word cells), so the results, which ARE
+/// deterministic here, are saved regardless. Also set in the user profiles (sql/schema.sql); kept here so the page
+/// works against a server whose profiles predate it.
 function chURL(extra, user) {
-    return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}${extra ? '&' + extra : ''}`;
+    return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}&query_cache_nondeterministic_function_handling=save${extra ? '&' + extra : ''}`;
 }
 async function chQuery(sql, params, fmt, settings) {
     let extra = `default_format=${fmt || 'RowBinary'}&replace_running_query=1${settings ? '&' + settings : ''}`;
@@ -595,7 +600,7 @@ async function drawWords() {
     const cfg = projCfg(), p = { x0, x1, y0, y1, cw, ch };   /// x0..y1 already integer + clamped to [0,2^32) by latlngToData
     const sql = cfg.three ? (Object.assign(p, rotParams()), wordViewSQL3d(cfg.table)) : wordViewSQL(cfg.xc, cfg.yc, cfg.table);
     try {
-        const txt = await (await chQuery(sql, p, 'JSONEachRowWithProgress', 'query_cache_nondeterministic_function_handling=save')).text();
+        const txt = await (await chQuery(sql, p, 'JSONEachRowWithProgress')).text();
         if (seq !== wordSeq) return;
         const cells = new Map();
         for (const line of txt.split('\n')) {
@@ -679,7 +684,7 @@ async function searchWordComment(L) {
             ORDER BY pow(toInt64(${xc})-toInt64({cx:UInt32}),2)+pow(toInt64(${yc})-toInt64({cy:UInt32}),2) ASC LIMIT 1 FORMAT TSV`;
     }
     try {
-        const id = (await (await chQuery(sql, p, 'TSV', 'query_cache_nondeterministic_function_handling=save')).text()).trim();
+        const id = (await (await chQuery(sql, p, 'TSV')).text()).trim();
         if (id) showReport(id); else setStatus('no comment for “' + L.word + '” nearby');
     } catch (err) { showError(String(err).slice(0, 400)); }
 }
