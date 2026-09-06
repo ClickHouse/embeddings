@@ -1480,12 +1480,23 @@ async function webPreview(url, seq, img) {
     img.src = s > NSFW_T ? NSFW_IMG : fullImgURL(url);
 }
 let previewKey = null;                                      /// key of the preview currently shown in #full (null when hidden)
+let previewImgKey = null;                                   /// key of the image currently held by #full-img (survives hide)
 function previewImg(md5) {
     previewKey = md5;
     if (isHN()) return previewComment(md5);
     document.getElementById('full-comment').style.display = 'none';
     document.getElementById('full-meta').style.display = '';
-    const img = document.getElementById('full-img'); img.style.display = '';
+    const img = document.getElementById('full-img');
+    /// Switching to another image: assigning a new src keeps the OLD bitmap on screen until the new one has decoded
+    /// (the new load is only a "pending request"), so the previous preview flashed up for the new tile. Hide the <img>
+    /// until the new image's load event; only the caption shows meanwhile. Same key again (re-hover) -> show as is.
+    if (md5 !== previewImgKey) {
+        previewImgKey = md5;
+        img.style.display = 'none';
+        img.onload = () => { if (previewImgKey === md5) img.style.display = ''; };
+        img.onerror = () => {};                              /// broken image stays hidden rather than showing a stale one
+        img.removeAttribute('src');
+    } else img.style.display = '';
     document.getElementById('full').style.display = 'block';
     if (corpus === 'web') {                                  /// caption = clickable live-site link (key IS the url)
         document.getElementById('full-meta').innerHTML = `<a href="${esc(md5)}" target="_blank" rel="noopener">${esc(md5)}</a>`;
