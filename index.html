@@ -896,7 +896,7 @@ async function addOverlayThumbs(rows) {   /// rows: [{md5,x,y}] (Photos) | [{md5
         const ll = dataToLatLng(dc.x, dc.y);
         const marker = L.marker(ll, { icon: overlayIcon(r.md5, MAX_THUMB, by), keyboard: false, riseOnHover: true })
             .on('click', () => showReport(r.md5))
-            .on('mouseover', () => { if (rotating) return; previewImg(r.md5); highlightTags(r.md5); })   /// no hover preview mid-rotation
+            .on('mouseover', () => { if (rotating) return; schedulePreview(r.md5); highlightTags(r.md5); })   /// no hover preview mid-rotation
             .on('mouseout', () => { hidePreview(); clearTagHl(); })
             .addTo(topkLayer);
         overlayPts.push({ md5: r.md5, ll, marker, size: MAX_THUMB, e3d, by });
@@ -1434,7 +1434,7 @@ function thumbImg(md5, isQuery) {
     img.title = isQuery ? 'query · hover to preview' : md5 + ' · click to search from here';
     if (isQuery) img.style.borderColor = '#ff0';
     else { img.dataset.md5 = md5; img.onclick = () => showReport(md5); }   /// data-md5 -> tag-cloud dimming
-    img.onmouseenter = () => { previewImg(md5); highlightTags(md5); };   /// hover a thumb -> underline its tags
+    img.onmouseenter = () => { schedulePreview(md5); highlightTags(md5); };   /// hover a thumb -> underline its tags (debounced preview)
     img.onmouseleave = () => { hidePreview(); clearTagHl(); };
     return img;
 }
@@ -1449,7 +1449,7 @@ function commentCard(row) {
         `<a href="https://news.ycombinator.com/item?id=${id}" target="_blank" rel="noopener" onclick="event.stopPropagation()">item ↗</a></div>` +
         `<div class="hntext">${row.text || ''}</div>`;   /// HN comment text is server-sanitised HTML -> render as-is
     div.onclick = () => showReport(id);                     /// click a comment -> search from it
-    div.onmouseenter = () => previewComment(id);            /// hover -> full comment in the bottom-left card
+    div.onmouseenter = () => schedulePreview(id);           /// hover -> full comment in the bottom-left card (debounced)
     div.onmouseleave = () => hidePreview();
     return div;
 }
@@ -1526,7 +1526,15 @@ async function loadMeta(md5) {
         if (lic) { if (author) meta.append(' · '); const s = document.createElement('span'); s.className = 'lic'; s.textContent = lic; s.title = licUrl || ''; meta.append(s); }
     } catch (e) { /* ignore transient metadata errors */ }
 }
-function hidePreview() { document.getElementById('full').style.display = 'none'; document.getElementById('full-meta').textContent = ''; }
+/// Debounced preview for result tiles / markers / cards. A fast sweep across tiles used to fire one full-image load
+/// per tile crossed, and the browser painted whichever finished first -- so a tile the cursor had long left could pop
+/// up late, before the one it rests on. Only a tile hovered for PREVIEW_DELAY ms is requested; leaving it or moving
+/// on to another cancels the pending one. (Map hovers have their own 100 ms dwell timer, see hoverPreview/hoverThumb.)
+const PREVIEW_DELAY = 120;
+let previewTimer = null;
+function cancelPreview() { if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; } }
+function schedulePreview(key) { cancelPreview(); previewTimer = setTimeout(() => { previewTimer = null; previewImg(key); }, PREVIEW_DELAY); }
+function hidePreview() { cancelPreview(); document.getElementById('full').style.display = 'none'; document.getElementById('full-meta').textContent = ''; }
 function hideReport() {
     document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
     reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
