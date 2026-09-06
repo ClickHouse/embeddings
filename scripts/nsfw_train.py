@@ -13,7 +13,7 @@ ADULT = ("url LIKE '%pornhub%' OR url LIKE '%xvideos%' OR url LIKE '%xnxx%' OR u
 
 def fetch(where, limit):
     sql = f"SELECT CAST(embedding,'Array(Float32)') FROM default.web_emb_img_siglip2 WHERE {where} LIMIT {limit} FORMAT RowBinary"
-    url = f"{HOST}/?user=website&password=&use_query_cache=0"
+    url = f"{HOST}/?user=website&password="
     data = urllib.request.urlopen(urllib.request.Request(url, data=sql.encode(), method="POST"), context=CTX, timeout=300).read()
     o = 0; rows = []
     while o < len(data):

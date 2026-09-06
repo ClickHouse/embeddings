@@ -14,7 +14,7 @@ A zoomable, tile-rendered map of an embedding "sphere" — the whole corpus proj
 random Hadamard rotation, colored by density (OKLCH lightness) and a third projected axis (OKLCH hue).
 Pure static HTML + Leaflet; it queries a ClickHouse HTTP endpoint directly (read-only `website` user).
 
-- **Point-cloud mode** — each tile is a `RowBinary` raster of sparse `(px,py,r,g,b)` pixels aggregated
+- **Point-cloud mode** — each tile is a dense 1024x1024 `(r,g,b)` `RowBinary` raster (`ORDER BY pos WITH FILL`, zstd over HTTP) of pixels aggregated
   server-side (`GROUP BY` pixel, density→lightness, mean-z→hue), scattered into a canvas `ImageData`.
 - **Thumbnail mode** — one representative image per 75×75 cell, rendered from `mmcommons.image_thumbs2`
   (75×75 gamma-correct RGB thumbnails) as PNG straight from ClickHouse.

@@ -64,6 +64,7 @@ GRANT SELECT ON mmcommons.* TO website;
 ALTER USER website SETTINGS
     allow_experimental_qbit_type = 1,
     use_query_cache = 1,
+    query_cache_ttl = 864000,            -- 10 days (default 60s): layouts are immutable between re-materializations
     max_execution_time = 60 MAX 300,
     max_memory_usage = 6000000000 MAX 12000000000,
     max_result_rows = 5000000 MAX 20000000,
@@ -84,7 +85,7 @@ ALTER USER website_thumbs SETTINGS
     max_threads = 2,                     -- point queries don't need parallelism; leave cores for `website`
     readonly = 2;
 
--- Tile query (point cloud), parameterized by {z,x,y,table}; returns sparse (px,py,r,g,b) RowBinary.
+-- Tile query (point cloud), parameterized by {z,x,y,table}; returns a dense TILE*TILE x (r,g,b) UInt8 RowBinary raster (GROUP BY pos ORDER BY pos WITH FILL).
 -- Density -> OKLCH lightness, mean projected-z -> OKLCH hue.  See site/index.html tileSQL().
 
 

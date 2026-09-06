@@ -345,7 +345,7 @@ const repMaxDims = () => qbitInfo().dim;
 
 /// ---- ClickHouse HTTP ----
 function chURL(extra, user) {
-    return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}&${extra}`;
+    return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}${extra ? '&' + extra : ''}`;
 }
 async function chQuery(sql, params, fmt, settings) {
     let extra = `default_format=${fmt || 'RowBinary'}&replace_running_query=1${settings ? '&' + settings : ''}`;
@@ -382,7 +382,7 @@ function ensureHueRange(cfg) {
     const col = cfg.three ? 'color' : cfg.zc, norm = cfg.three ? 1 : 65535;
     hueRanges[key] = (async () => {
         try {
-            const txt = await (await chQuery(`SELECT quantile(0.01)(${col}), quantile(0.99)(${col}) FROM ${cfg.table} FORMAT JSONCompactEachRow`, {}, 'JSONCompactEachRow', 'use_query_cache=0')).text();
+            const txt = await (await chQuery(`SELECT quantile(0.01)(${col}), quantile(0.99)(${col}) FROM ${cfg.table} FORMAT JSONCompactEachRow`, {}, 'JSONCompactEachRow')).text();
             const [a, b] = JSON.parse((txt.trim().split('\n')[0]) || '[0,1]');
             let lo = a / norm, hi = b / norm;
             if (!(hi > lo)) { lo = 0; hi = 1; }
@@ -399,21 +399,21 @@ function tileSQL(table, q99, lo, hi) {
     const { xc, yc, zc } = projCfg();   /// data columns: x,y,z (linear) or mx,my,mz (UMAP). {x:}/{y:} below are tile coords.
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
         ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0,
-        greatest(${q99} / pow(4, {z:UInt8}), ${Q_FLOOR}) AS q
-    SELECT px, py,
-        tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
-    FROM (
-        SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, least(1., greatest(0., (hue - (${lo})) / ((${hi}) - (${lo})))) * 360)) AS c
-        FROM (
-            SELECT toUInt16(intDiv((${xc} - tx0) * ${TILE}, ts)) AS px,
-                   toUInt16(intDiv((${yc} - ty0) * ${TILE}, ts)) AS py,
-                   count() AS cnt, avg(${zc}) / 65535 AS hue
-            FROM ${table}
-            WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
-            GROUP BY px, py
-        )
-    ) FORMAT RowBinary`;
+        greatest(${q99} / pow(4, {z:UInt8}), ${Q_FLOOR}) AS q,
+        toUInt32(intDiv((${yc} - ty0) * ${TILE}, ts)) * ${TILE} + toUInt32(intDiv((${xc} - tx0) * ${TILE}, ts)) AS pos,
+        count() AS cnt, avg(${zc}) / 65535 AS hue,
+        colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, least(1., greatest(0., (hue - (${lo})) / ((${hi}) - (${lo})))) * 360)) AS c
+    SELECT tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
+    FROM ${table}
+    WHERE ${xc} >= tx0 AND ${xc} < tx0 + ts AND ${yc} >= ty0 AND ${yc} < ty0 + ts
+    ${TILE_TAIL}`;
 }
+/// Dense tile wire format (adsb.exposed style): TILE*TILE rows of 3 UInt8 (r,g,b) in RowBinary = raw RGB bytes in
+/// row-major order, pixel (px,py) at byte (py*TILE+px)*3, no coordinates on the wire. `pos` is the GROUP BY key and
+/// the ORDER BY ... WITH FILL column but is NOT selected: WITH FILL inserts a 0,0,0 row for every empty pixel, so the
+/// output is implicitly sorted and always exactly TILE*TILE*3 bytes.
+/// vs the former sparse (px,py,r,g,b) rows in GROUP BY order: zoom-0 tile 7.08 MB -> 1.76 MB after zstd.
+const TILE_TAIL = `GROUP BY pos ORDER BY pos WITH FILL FROM 0 TO ${TILE * TILE} FORMAT RowBinary`;
 /// One representative md5 per 75px cell for the thumbnails overlay.
 function thumbCellsSQL(table) {
     const CELL = C().thumbPx || 75; const { xc, yc } = projCfg();
@@ -496,18 +496,13 @@ function tileSQL3d(table, q99, lo, hi) {
     const PY = `toUInt32(least(1.,greatest(0.,${ry}*${U3D_PS}+0.5))*4294967295)`;
     const hue = `least(1.,greatest(0.,(color-(${lo}))/((${hi})-(${lo}))))`;   /// [1%,99%] colour range (not u.clo/u.chi = min/max)
     return `WITH bitShiftLeft(1::UInt64, ${COORD_BITS} - {z:UInt8}) AS ts,
-        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, greatest(${q99} / pow(4, {z:UInt8}), ${Q_FLOOR}) AS q
-    SELECT px, py, tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
-    FROM (
-        SELECT px, py, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, hue * 360)) AS c
-        FROM (
-            SELECT toUInt16(intDiv((PX - tx0) * ${TILE}, ts)) AS px,
-                   toUInt16(intDiv((PY - ty0) * ${TILE}, ts)) AS py, count() AS cnt, avg(hue) AS hue
-            FROM (SELECT ${PX} AS PX, ${PY} AS PY, ${hue} AS hue FROM ${table})
-            WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
-            GROUP BY px, py
-        )
-    ) FORMAT RowBinary`;
+        ts * {x:UInt32} AS tx0, ts * {y:UInt32} AS ty0, greatest(${q99} / pow(4, {z:UInt8}), ${Q_FLOOR}) AS q,
+        toUInt32(intDiv((PY - ty0) * ${TILE}, ts)) * ${TILE} + toUInt32(intDiv((PX - tx0) * ${TILE}, ts)) AS pos,
+        count() AS cnt, avg(hue) AS h, colorOKLCHToSRGB((0.75 * (cnt / q), 0.16, h * 360)) AS c
+    SELECT tupleElement(c,1)::UInt8 AS r, tupleElement(c,2)::UInt8 AS g, tupleElement(c,3)::UInt8 AS b
+    FROM (SELECT ${PX} AS PX, ${PY} AS PY, ${hue} AS hue FROM ${table})
+    WHERE PX >= tx0 AND PX < tx0 + ts AND PY >= ty0 AND PY < ty0 + ts
+    ${TILE_TAIL}`;
 }
 /// Render the point cloud into a Display-P3 canvas where supported: the server's sRGB-valued colours are
 /// placed as P3 coordinates, so on wide-gamut/HDR displays the cloud shows more vivid colour. Falls back to
@@ -517,6 +512,12 @@ const CANVAS_CS = (() => {
           return c && c.getContextAttributes && c.getContextAttributes().colorSpace === 'display-p3' ? 'display-p3' : 'srgb'; }
     catch (e) { return 'srgb'; }
 })();
+/// Pixel tiles are dense raw RGB (see TILE_TAIL) and highly redundant -> ask the server to compress the HTTP body.
+/// The browser advertises Accept-Encoding itself (fetch() forbids setting it) and ClickHouse picks the strongest
+/// codec it lists, zstd first (Chrome 123+, Firefox 126+; older browsers fall back to br/gzip), decoding is
+/// transparent to fetch(). Level 6: ~2.4x smaller than raw at negligible server cost. http_zlib_compression_level
+/// is the level for every codec, despite the name. NOT used for FORMAT PNG responses, which are already compressed.
+const TILE_HTTP_COMPRESSION = 'enable_http_compression=1&http_zlib_compression_level=6';
 /// The point cloud is a persistent base layer shown in BOTH modes; switching points<->thumbs
 /// never re-renders (or re-queries) it — see applyMode. Projection / 3D-rotation changes DO
 /// re-render it (the tile coordinates genuinely change) via redraw(). Thumbs mode dims it via
@@ -531,16 +532,15 @@ async function renderTile(coords, canvas) {
         let sql;
         if (cfg.three) { Object.assign(p, rotParams()); sql = tileSQL3d(table, q99, hr.lo, hr.hi); }   /// UMAP 3D: rotated projection
         else sql = tileSQL(table, q99, hr.lo, hr.hi);
-        const buf = await (await chQuery(sql, p)).arrayBuffer();
+        const buf = await (await chQuery(sql, p, 'RowBinary', TILE_HTTP_COMPRESSION)).arrayBuffer();
         if (canvas._rseq !== seq) return;                 /// superseded -> keep the current image (no blank / no stale overwrite)
-        const dv = new DataView(buf);
-        const img = ctx.createImageData(TILE, TILE, { colorSpace: CANVAS_CS });
-        for (let o = 0; o + 7 <= buf.byteLength; o += 7) {
-            const px = dv.getUint16(o, true), py = dv.getUint16(o + 2, true);
-            const i = (py * TILE + px) * 4;
-            img.data[i] = dv.getUint8(o + 4); img.data[i+1] = dv.getUint8(o + 5);
-            img.data[i+2] = dv.getUint8(o + 6); img.data[i+3] = 255;
+        const rgb = new Uint8Array(buf), d = new Uint32Array(TILE * TILE);   /// dense RGB, row-major (see TILE_TAIL)
+        const n = Math.min((rgb.length / 3) | 0, TILE * TILE);
+        for (let i = 0, o = 0; i < n; i++, o += 3) {
+            const r = rgb[o], g = rgb[o + 1], b = rgb[o + 2];
+            if (r | g | b) d[i] = 0xFF000000 | (b << 16) | (g << 8) | r;   /// RGBA little-endian; empty pixels stay transparent
         }
+        const img = new ImageData(new Uint8ClampedArray(d.buffer), TILE, TILE, { colorSpace: CANVAS_CS });
         ctx.putImageData(img, 0, 0);
         hideError();
     } catch (e) { showError(String(e).slice(0, 500)); }
@@ -729,7 +729,7 @@ function fullImgURL(key) {
                     FROM (SELECT screenshot AS s FROM default.web_screenshots WHERE url = {k:String} LIMIT 1)))
         GROUP BY op ORDER BY op
         FORMAT PNG SETTINGS output_format_image_width = 640, output_format_image_height = 640`;
-    return chURL(`default_format=PNG&use_query_cache=0&max_result_rows=1000000&param_k=${encodeURIComponent(key)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
+    return chURL(`default_format=PNG&max_result_rows=1000000&param_k=${encodeURIComponent(key)}&query=${encodeURIComponent(sql)}`, USER_THUMBS);
 }
 
 /// ---- Map ----
@@ -994,7 +994,7 @@ async function showTagHover(id, cp, seq) {
                     WHERE token IN (SELECT arrayJoin(${TOK}) FROM ${HN_ITEMS} WHERE ${KEY()}={k:${C().keyType}}) GROUP BY token HAVING cf >= 20) AS s USING (token)
         ORDER BY (1 + log(t.tf)) * log(${T} / s.cf) DESC LIMIT 3 FORMAT TSV`;
     try {
-        const url = chURL(`use_query_cache=0&param_k=${encodeURIComponent(id)}`, USER_THUMBS);
+        const url = chURL(`param_k=${encodeURIComponent(id)}`, USER_THUMBS);
         const txt = (await (await fetch(url, { method: 'POST', body: sql })).text()).trim();
         if (seq !== hoverSeq) return;                        /// a newer hover superseded this
         const tags = txt.split('\n').filter(Boolean);
@@ -1219,7 +1219,7 @@ async function updateTokenCloud() {
         const aSql = `SELECT token, count() AS tf FROM (SELECT arrayJoin(${TOK}) AS token FROM ${HN_ITEMS} WHERE ${KEY()} IN (${ids.join(',')}))
             WHERE ${notStop('token')}
             GROUP BY token HAVING tf >= 3 ORDER BY tf DESC LIMIT 1500 FORMAT JSONCompactEachRow`;
-        const aTxt = await (await fetch(chURL('use_query_cache=0'), { method: 'POST', body: aSql })).text();
+        const aTxt = await (await fetch(chURL(''), { method: 'POST', body: aSql })).text();
         if (seq !== tagSeq || !reportActive) return;
         const tf = new Map();
         for (const l of aTxt.trim().split('\n').filter(Boolean)) { const [tok, n] = JSON.parse(l); tf.set(tok, n); }
@@ -1227,7 +1227,7 @@ async function updateTokenCloud() {
         /// corpus frequency of exactly those tokens (PK seek on the token-sorted stats table)
         const inlist = [...tf.keys()].map(t => `'${esc1(t)}'`).join(',');
         const bSql = `SELECT token, sum(cnt) AS cf FROM default.hackernews_tokens_stats WHERE token IN (${inlist}) GROUP BY token FORMAT JSONCompactEachRow`;
-        const bTxt = await (await fetch(chURL('use_query_cache=0'), { method: 'POST', body: bSql })).text();
+        const bTxt = await (await fetch(chURL(''), { method: 'POST', body: bSql })).text();
         if (seq !== tagSeq || !reportActive) return;
         const cf = new Map();
         for (const l of bTxt.trim().split('\n').filter(Boolean)) { const [tok, c] = JSON.parse(l); cf.set(tok, c); }
