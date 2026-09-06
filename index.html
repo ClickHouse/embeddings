@@ -80,6 +80,16 @@
     #report { position: absolute; top: 0; right: 0; bottom: 0; width: 40%; max-width: 640px;
         z-index: 1002; background: rgba(15,15,15,.97); overflow-y: auto; display: none;
         scrollbar-gutter: stable; box-shadow: -4px 0 20px rgba(0,0,0,.7); }
+    /* drag handle on the report's left border (mouse or touch) -> resizes the panel; JS keeps `right` = panel width.
+       A sibling of #report (not a child) so the scrolling/clipping panel can't move or hide it. */
+    #rep-handle { display: none; position: absolute; top: 0; bottom: 0; width: 14px; margin-right: -7px; right: min(40%, 640px);
+        z-index: 1003; cursor: ew-resize; touch-action: none; }
+    body.report-open #rep-handle { display: block; }
+    #rep-handle::after { content: ''; position: absolute; left: 50%; top: 50%; width: 4px; height: 44px; margin: -22px 0 0 -2px;
+        border-radius: 2px; background: #aaa; box-shadow: 0 0 0 1px #000, 0 0 6px #000; }
+    #rep-handle:hover::after, body.panel-resizing #rep-handle::after { background: #ff0; }
+    body.panel-resizing, body.panel-resizing * { cursor: ew-resize !important; user-select: none; }
+    @media (pointer: coarse) { #rep-handle { width: 28px; margin-right: -14px; } }   /* fatter touch target on phones */
     /* sticky top-K header: title + controls + progress stay put while the grid scrolls under it */
     #rep-head { position: sticky; top: 0; z-index: 5; background: #101010;
         padding: .5em .6em .4em; box-shadow: 0 3px 10px rgba(0,0,0,.55); }
@@ -144,7 +154,7 @@
     <span id="zoom" title="map zoom level"></span>
 </div>
 <div id="tagcloud"></div>
-<div id="report"><div id="report-body"></div></div>
+<div id="report"><div id="report-body"></div></div><div id="rep-handle" title="Drag to resize · double-click to reset"></div>
 <div id="full"><img id="full-img"><div id="full-comment"></div><div id="full-meta"></div></div>
 <img id="hover">
 <div id="hovertags"></div>
@@ -344,8 +354,13 @@ const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
 const repMaxDims = () => qbitInfo().dim;
 
 /// ---- ClickHouse HTTP ----
+/// Every query goes through here. query_cache_nondeterministic_function_handling=save: the users' profiles keep the
+/// query cache ON, and ClickHouse refuses (error 704) to cache a query that uses a function it deems non-deterministic
+/// -- arrayJoin is one (token clouds, hover tags, the screenshot render, HN word cells), so the results, which ARE
+/// deterministic here, are saved regardless. Also set in the user profiles (sql/schema.sql); kept here so the page
+/// works against a server whose profiles predate it.
 function chURL(extra, user) {
-    return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}${extra ? '&' + extra : ''}`;
+    return `${HOST}/?user=${user || USER}&password=${encodeURIComponent(PASS)}&query_cache_nondeterministic_function_handling=save${extra ? '&' + extra : ''}`;
 }
 async function chQuery(sql, params, fmt, settings) {
     let extra = `default_format=${fmt || 'RowBinary'}&replace_running_query=1${settings ? '&' + settings : ''}`;
@@ -595,7 +610,7 @@ async function drawWords() {
     const cfg = projCfg(), p = { x0, x1, y0, y1, cw, ch };   /// x0..y1 already integer + clamped to [0,2^32) by latlngToData
     const sql = cfg.three ? (Object.assign(p, rotParams()), wordViewSQL3d(cfg.table)) : wordViewSQL(cfg.xc, cfg.yc, cfg.table);
     try {
-        const txt = await (await chQuery(sql, p, 'JSONEachRowWithProgress', 'query_cache_nondeterministic_function_handling=save')).text();
+        const txt = await (await chQuery(sql, p, 'JSONEachRowWithProgress')).text();
         if (seq !== wordSeq) return;
         const cells = new Map();
         for (const line of txt.split('\n')) {
@@ -679,7 +694,7 @@ async function searchWordComment(L) {
             ORDER BY pow(toInt64(${xc})-toInt64({cx:UInt32}),2)+pow(toInt64(${yc})-toInt64({cy:UInt32}),2) ASC LIMIT 1 FORMAT TSV`;
     }
     try {
-        const id = (await (await chQuery(sql, p, 'TSV', 'query_cache_nondeterministic_function_handling=save')).text()).trim();
+        const id = (await (await chQuery(sql, p, 'TSV')).text()).trim();
         if (id) showReport(id); else setStatus('no comment for “' + L.word + '” nearby');
     } catch (err) { showError(String(err).slice(0, 400)); }
 }
@@ -1524,7 +1539,7 @@ function layoutForReport(open) {
     document.body.classList.toggle('report-open', open);
     if (!open) {
         const r = document.getElementById('report'); r.style.width = ''; r.style.maxWidth = '';
-        document.getElementById('map').style.right = ''; document.getElementById('panel').style.right = '';   /// restore full-width header
+        for (const id of ['map', 'panel', 'rep-handle']) document.getElementById(id).style.right = '';   /// restore full-width header
         offsetControls();
     }
     map.invalidateSize();
@@ -1535,31 +1550,62 @@ function layoutForReport(open) {
 function fitPanelWidth() {
     const report = document.getElementById('report'), grid = document.getElementById('grid');
     if (!grid) return;
-    if (isHN()) {   /// comment list: keep the CSS panel width (no whole-column trim), just match the map/header edge
-        report.style.width = ''; report.style.maxWidth = '';
-        if (reportActive) {
-            const w = report.offsetWidth;
-            document.getElementById('map').style.right = w + 'px';
-            document.getElementById('panel').style.right = w + 'px';
-            offsetControls(); placeTagCloud(); map.invalidateSize();
-        }
+    /// base width to measure from: the user-dragged width if any (see the resize handle), else CSS (40% / 640px)
+    if (userPanelW) { report.style.maxWidth = 'none'; report.style.width = clampPanelW(userPanelW) + 'px'; }
+    else { report.style.width = ''; report.style.maxWidth = ''; }
+    if (isHN()) {   /// comment list: keep the base panel width (no whole-column trim), just match the map/header edge
+        if (reportActive) setPanelWidth(report.offsetWidth);
         return;
     }
-    report.style.width = ''; report.style.maxWidth = '';   /// back to CSS (40% / 640px) to measure
     const CELL = 75, GAP = 3, cs = getComputedStyle(grid);
     const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
     const content = grid.clientWidth - padX;               /// actual grid content width at the max
-    const cols = Math.max(1, Math.floor((content + GAP) / (CELL + GAP)));
-    const leftover = content - (cols * CELL + (cols - 1) * GAP);
-    const w = report.offsetWidth - Math.floor(leftover);   /// floor keeps all cols (leaves <1px, never drops one)
+    let cols = Math.max(1, Math.floor((content + GAP) / (CELL + GAP)));
+    let leftover = content - (cols * CELL + (cols - 1) * GAP);
+    /// dragged width: snap to the NEAREST whole column (may grow by < half a cell) so the panel doesn't visibly jump
+    /// back after release; default CSS width is a maximum, so it only ever trims (floor keeps all cols, leaves <1px)
+    if (userPanelW && leftover > (CELL + GAP) / 2 && report.offsetWidth - leftover + CELL + GAP <= innerWidth - 32) { cols++; leftover -= CELL + GAP; }
+    const w = report.offsetWidth - Math.floor(leftover);
     report.style.maxWidth = 'none'; report.style.width = w + 'px';
-    if (reportActive) {
-        document.getElementById('map').style.right = w + 'px';
-        document.getElementById('panel').style.right = w + 'px';   /// shrink the header too so status/zoom stay visible
-        offsetControls(); placeTagCloud();                          /// panel width (and height, if it wraps) may have changed
-        map.invalidateSize();
-    }
+    if (reportActive) setPanelWidth(w);
 }
+/// Apply a panel width everywhere that depends on it: the panel itself, the map's and header's right edge (so
+/// status/zoom stay visible and nothing overlaps), the drag handle, Leaflet's control offset and the tag cloud.
+function setPanelWidth(w) {
+    const report = document.getElementById('report');
+    report.style.maxWidth = 'none'; report.style.width = w + 'px';
+    for (const id of ['map', 'panel', 'rep-handle']) document.getElementById(id).style.right = w + 'px';
+    offsetControls(); placeTagCloud();                          /// header height may change when it re-wraps
+    map.invalidateSize();
+}
+/// ---- Resizable report panel: drag its left border (mouse or touch; pointer events cover both) ----
+/// Live-resizes while dragging; on release the width is remembered (localStorage) and, for photo grids, snapped to a
+/// whole number of thumbnail columns by fitPanelWidth. Double-click/tap the handle to go back to the default width.
+/// Mainly for phones, where the default 40% panel is one column wide: drag it out to (almost) full screen.
+let userPanelW = +localStorage.getItem('panelW') || 0;
+const clampPanelW = w => Math.round(Math.max(120, Math.min(innerWidth - 32, w)));   /// keep a sliver of map to drag back
+(function () {
+    const h = document.getElementById('rep-handle');
+    let dragging = false, raf = 0, lastTap = 0;
+    h.addEventListener('pointerdown', e => {
+        dragging = true; h.setPointerCapture(e.pointerId); document.body.classList.add('panel-resizing'); e.preventDefault();
+        const now = Date.now();                                   /// double-tap (touch has no dblclick) -> reset
+        if (now - lastTap < 350) { dragging = false; userPanelW = 0; localStorage.removeItem('panelW'); document.body.classList.remove('panel-resizing'); fitPanelWidth(); }
+        lastTap = now;
+    });
+    h.addEventListener('pointermove', e => {
+        if (!dragging) return;
+        userPanelW = clampPanelW(innerWidth - e.clientX);
+        if (!raf) raf = requestAnimationFrame(() => { raf = 0; setPanelWidth(userPanelW); });   /// one layout per frame
+    });
+    const end = () => {
+        if (!dragging) return;
+        dragging = false; document.body.classList.remove('panel-resizing');
+        localStorage.setItem('panelW', userPanelW);
+        fitPanelWidth();                                          /// snap to whole columns from the dragged width
+    };
+    h.addEventListener('pointerup', end); h.addEventListener('pointercancel', end);
+})();
 
 /// ---- Switchers ----
 function buildSwitch(elemId, keys, current, onPick) {

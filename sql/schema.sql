@@ -65,6 +65,7 @@ ALTER USER website SETTINGS
     allow_experimental_qbit_type = 1,
     use_query_cache = 1,
     query_cache_ttl = 864000,            -- 10 days (default 60s): layouts are immutable between re-materializations
+    query_cache_nondeterministic_function_handling = 'save',   -- arrayJoin counts as non-deterministic -> error 704 otherwise
     max_execution_time = 60 MAX 300,
     max_memory_usage = 6000000000 MAX 12000000000,
     max_result_rows = 5000000 MAX 20000000,
@@ -77,6 +78,7 @@ CREATE USER IF NOT EXISTS website_thumbs IDENTIFIED WITH sha256_password BY 'Emb
 GRANT SELECT ON mmcommons.* TO website_thumbs;
 ALTER USER website_thumbs SETTINGS
     use_query_cache = 1,                 -- thumbnails repeat a lot -> query cache is a big win
+    query_cache_nondeterministic_function_handling = 'save',   -- screenshot render / hover tags use arrayJoin
     query_cache_ttl = 31536000,          -- 1 year (default is 60s; max safe is int32 seconds ~68y --
                                          -- larger values overflow internally to a PAST date, e.g. 100y -> 1990)
     max_execution_time = 10 MAX 30,
