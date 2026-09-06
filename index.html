@@ -1023,9 +1023,12 @@ async function showTagHover(id, cp, seq) {
 const thumbsHover = () => mode === 'thumbs' && !reportActive;   /// map-thumbnail hover is active only outside topK
 map.on('mousemove', (e) => {
     hideHover();                                             /// moving -> hide, restart the dwell timer
-    if (thumbsHover()) hidePreview();                       /// hide the thumbs full-image preview while moving (NOT in topK: the
-    if (rotating || panning) return;                        /// overlay markers own #full there via their own mouseover/mouseout)
     const ll = e.latlng, cp = e.containerPoint;
+    if (thumbsHover()) {                                    /// thumbs mode: the full-image preview (NOT in topK: the overlay
+        if (!rotating && !panning && previewKey && thumbMd5At(latlngToData(ll)) === previewKey) return;   /// markers own #full there)
+        hidePreview();                                      /// still over the SAME thumb -> keep its preview, no hide/reload blink; else hide
+    }
+    if (rotating || panning) return;
     if (mode === 'points' || mode === 'words') hoverTimer = setTimeout(() => hoverPreview(ll, cp), 100);   /// nearest point -> thumbnail (Photos) / comment (HN); also under the word cloud
     else if (thumbsHover()) hoverTimer = setTimeout(() => hoverThumb(ll), 100);                /// map thumbnail -> full preview
 });
@@ -1064,7 +1067,7 @@ function hoverPreview3D(cp) {   /// points mode: nearest point -> thumbnail (Pho
 function hoverThumb(latlng) {
     if (mode !== 'thumbs' || reportActive) return;
     const m = thumbMd5At(latlngToData(latlng));
-    if (m) previewImg(m);
+    if (m && m !== previewKey) previewImg(m);              /// same thumb already previewed -> nothing to reload
 }
 async function hoverPreview(latlng, cp) {
     if (mode !== 'points') return;
@@ -1475,7 +1478,9 @@ async function webPreview(url, seq, img) {
     if (seq !== metaSeq) return;                             /// a newer hover superseded this lookup
     img.src = s > NSFW_T ? NSFW_IMG : fullImgURL(url);
 }
+let previewKey = null;                                      /// key of the preview currently shown in #full (null when hidden)
 function previewImg(md5) {
+    previewKey = md5;
     if (isHN()) return previewComment(md5);
     document.getElementById('full-comment').style.display = 'none';
     document.getElementById('full-meta').style.display = '';
@@ -1534,7 +1539,7 @@ const PREVIEW_DELAY = 120;
 let previewTimer = null;
 function cancelPreview() { if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; } }
 function schedulePreview(key) { cancelPreview(); previewTimer = setTimeout(() => { previewTimer = null; previewImg(key); }, PREVIEW_DELAY); }
-function hidePreview() { cancelPreview(); document.getElementById('full').style.display = 'none'; document.getElementById('full-meta').textContent = ''; }
+function hidePreview() { cancelPreview(); previewKey = null; document.getElementById('full').style.display = 'none'; document.getElementById('full-meta').textContent = ''; }
 function hideReport() {
     document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
     reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
