@@ -1,0 +1,138 @@
+<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<title>Quantized codec recall</title>
+<style>
+  body { background:#111; color:#ddd; font:16px system-ui,-apple-system,sans-serif; margin:0; padding:1em 1.2em; }
+  a { color:#ff0; }
+  h1 { font-size:19px; color:#ff0; margin:.2em 0 .1em; }
+  .sub { color:#888; font-size:14px; margin-bottom:.6em; max-width:74em; line-height:1.45; }
+  .ctl { display:flex; flex-wrap:wrap; gap:.35em 1.4em; align-items:center; margin:.5em 0 1em; }
+  .ctl > div { display:flex; align-items:center; gap:.3em; }
+  .ctl label { color:#999; font-size:13px; text-transform:uppercase; letter-spacing:.04em; }
+  .opt { padding:.16em .55em; background:#2b2b2b; border:1px solid #000; cursor:pointer; user-select:none; font-size:14px; border-radius:3px; }
+  .opt:hover { background:#ff0; color:#000; }
+  .opt.sel { background:#fff; color:#000; }
+  table { border-collapse:collapse; }
+  caption { caption-side:top; text-align:left; color:#8bc34a; font-family:monospace; margin-bottom:.45em; }
+  th, td { padding:.28em .5em; text-align:center; font-variant-numeric:tabular-nums; font-size:14px; }
+  th { color:#9a9a9a; font-weight:normal; }
+  th.cor { color:#ff0; text-align:right; white-space:nowrap; }
+  th.grp { color:#29b6f6; border-bottom:1px solid #2a2a2a; }
+  th.cs  { color:#666; font-size:12px; text-align:left; padding-top:.9em; text-transform:uppercase; letter-spacing:.05em; }
+  td.cell { color:#000; font-weight:600; min-width:52px; border:1px solid #111; transition:opacity .08s; line-height:1.15; }
+  td.cell.dim { opacity:.15; }         /* on hover: cells below the pointed value fade, so >= cells stand out */
+  td.cell .sz { display:block; font-size:11px; font-weight:400; opacity:.6; }   /* code bytes/vector, second line */
+  td.cell.best { outline:2px solid #fff; outline-offset:-2px; box-shadow:0 0 12px 3px rgba(255,255,255,.9);
+                 filter:brightness(1.18); position:relative; z-index:2; }
+  td.na { color:#555; }
+  .legend { display:flex; align-items:center; gap:.4em; margin-top:1em; color:#999; font-size:13px; }
+  .bar { width:220px; height:14px; border-radius:2px; cursor:crosshair;
+         background:linear-gradient(90deg,hsl(0,75%,50%),hsl(60,75%,50%),hsl(120,75%,50%)); }
+  .legval { color:#ff0; font-family:monospace; min-width:4em; }
+  .foot { margin-top:2.2em; color:#888; font-size:13px; }
+  .foot a { color:#ff0; }
+  .warn { color:#ff7043; font-size:13px; margin-top:.8em; }
+</style></head><body>
+<h1>Quantized codec recall &mdash; RaBitQ vs TurboQuant</h1>
+<div class=sub><a href="index.html">&#8592; Embeddings Explorer</a> &middot; <a href="recall.html">QBit recall &#8599;</a><br>
+Brute-force two-stage search over an <code>Array(BFloat16) CODEC(Quantized(&hellip;))</code> column: scan the
+quantized codes, keep k&nbsp;&times;&nbsp;multiplier candidates, then rescore those against the full-precision
+vectors. Recall is measured against exact-cosine ground truth on the same ~100k-row pool, 20 random queries,
+k&nbsp;=&nbsp;100. Green = 1.0, red = 0.0. The second line in each cell is the code size per vector
+(1&nbsp;bit/dim for RaBitQ, 2&nbsp;bits/dim for TurboQuant).</div>
+<div class=ctl>
+  <div><label>metric</label><span id=sw-me></span></div>
+</div>
+<div id=tbl></div>
+<div class=legend>0.0 <span class=bar id=bar></span> 1.0 <span id=legval class=legval></span></div>
+<div id=warn class=warn></div>
+<div class=foot><a href="https://github.com/ClickHouse/embeddings" target=_blank rel=noopener>About</a> | &copy; Alexey Milovidov, ClickHouse, Inc. (data: Multimedia Commons / WonderfulWeb / Hacker News)</div>
+<script>
+const DATA = [{"co":"hn","ds":"bge_large","cd":"rabitq","m":1,"dim":1024,"cb":128,"qz":1,"recall10":0.986,"recall100":0.6529,"recall10in100":0.986},{"co":"hn","ds":"bge_large","cd":"rabitq","m":5,"dim":1024,"cb":128,"qz":1,"recall10":0.999,"recall100":0.975,"recall10in100":0.999},{"co":"hn","ds":"bge_large","cd":"rabitq","m":10,"dim":1024,"cb":128,"qz":1,"recall10":1.0,"recall100":0.9959,"recall10in100":1.0},{"co":"hn","ds":"bge_large","cd":"turboquant","m":1,"dim":1024,"cb":256,"qz":1,"recall10":0.993,"recall100":0.7119,"recall10in100":0.993},{"co":"hn","ds":"bge_large","cd":"turboquant","m":5,"dim":1024,"cb":256,"qz":1,"recall10":1.0,"recall100":0.9914,"recall10in100":1.0},{"co":"hn","ds":"bge_large","cd":"turboquant","m":10,"dim":1024,"cb":256,"qz":1,"recall10":1.0,"recall100":0.9995,"recall10in100":1.0},{"co":"hn","ds":"nomic","cd":"rabitq","m":1,"dim":768,"cb":96,"qz":1,"recall10":0.956,"recall100":0.5531,"recall10in100":0.956},{"co":"hn","ds":"nomic","cd":"rabitq","m":5,"dim":768,"cb":96,"qz":1,"recall10":0.994,"recall100":0.9095,"recall10in100":0.994},{"co":"hn","ds":"nomic","cd":"rabitq","m":10,"dim":768,"cb":96,"qz":1,"recall10":1.0,"recall100":0.9727,"recall10in100":1.0},{"co":"hn","ds":"nomic","cd":"turboquant","m":1,"dim":768,"cb":192,"qz":1,"recall10":0.976,"recall100":0.6178,"recall10in100":0.976},{"co":"hn","ds":"nomic","cd":"turboquant","m":5,"dim":768,"cb":192,"qz":1,"recall10":0.998,"recall100":0.9612,"recall10in100":0.998},{"co":"hn","ds":"nomic","cd":"turboquant","m":10,"dim":768,"cb":192,"qz":1,"recall10":1.0,"recall100":0.9929,"recall10in100":1.0},{"co":"photos","ds":"clip","cd":"rabitq","m":1,"dim":768,"cb":96,"qz":1,"recall10":0.985,"recall100":0.6725,"recall10in100":0.985},{"co":"photos","ds":"clip","cd":"rabitq","m":5,"dim":768,"cb":96,"qz":1,"recall10":0.998,"recall100":0.969,"recall10in100":0.998},{"co":"photos","ds":"clip","cd":"rabitq","m":10,"dim":768,"cb":96,"qz":1,"recall10":0.998,"recall100":0.9923,"recall10in100":0.998},{"co":"photos","ds":"clip","cd":"turboquant","m":1,"dim":768,"cb":192,"qz":1,"recall10":0.987,"recall100":0.7033,"recall10in100":0.987},{"co":"photos","ds":"clip","cd":"turboquant","m":5,"dim":768,"cb":192,"qz":1,"recall10":1.0,"recall100":0.9852,"recall10in100":1.0},{"co":"photos","ds":"clip","cd":"turboquant","m":10,"dim":768,"cb":192,"qz":1,"recall10":1.0,"recall100":0.9969,"recall10in100":1.0},{"co":"photos","ds":"nomic","cd":"rabitq","m":1,"dim":768,"cb":96,"qz":1,"recall10":0.96,"recall100":0.6191,"recall10in100":0.96},{"co":"photos","ds":"nomic","cd":"rabitq","m":5,"dim":768,"cb":96,"qz":1,"recall10":0.997,"recall100":0.943,"recall10in100":0.997},{"co":"photos","ds":"nomic","cd":"rabitq","m":10,"dim":768,"cb":96,"qz":1,"recall10":0.997,"recall100":0.9798,"recall10in100":0.997},{"co":"photos","ds":"nomic","cd":"turboquant","m":1,"dim":768,"cb":192,"qz":1,"recall10":0.88,"recall100":0.5537,"recall10in100":0.88},{"co":"photos","ds":"nomic","cd":"turboquant","m":5,"dim":768,"cb":192,"qz":1,"recall10":0.993,"recall100":0.8965,"recall10in100":0.993},{"co":"photos","ds":"nomic","cd":"turboquant","m":10,"dim":768,"cb":192,"qz":1,"recall10":0.999,"recall100":0.9607,"recall10in100":0.999},{"co":"photos","ds":"siglip2","cd":"rabitq","m":1,"dim":1152,"cb":144,"qz":1,"recall10":0.988,"recall100":0.7122,"recall10in100":0.988},{"co":"photos","ds":"siglip2","cd":"rabitq","m":5,"dim":1152,"cb":144,"qz":1,"recall10":1.0,"recall100":0.9853,"recall10in100":1.0},{"co":"photos","ds":"siglip2","cd":"rabitq","m":10,"dim":1152,"cb":144,"qz":1,"recall10":1.0,"recall100":0.9976,"recall10in100":1.0},{"co":"photos","ds":"siglip2","cd":"turboquant","m":1,"dim":1152,"cb":288,"qz":1,"recall10":0.989,"recall100":0.7011,"recall10in100":0.989},{"co":"photos","ds":"siglip2","cd":"turboquant","m":5,"dim":1152,"cb":288,"qz":1,"recall10":0.998,"recall100":0.9861,"recall10in100":0.998},{"co":"photos","ds":"siglip2","cd":"turboquant","m":10,"dim":1152,"cb":288,"qz":1,"recall10":1.0,"recall100":0.9975,"recall10in100":1.0},{"co":"web","ds":"img_siglip2","cd":"rabitq","m":1,"dim":1152,"cb":144,"qz":1,"recall10":0.978,"recall100":0.6474,"recall10in100":0.978},{"co":"web","ds":"img_siglip2","cd":"rabitq","m":5,"dim":1152,"cb":144,"qz":1,"recall10":0.999,"recall100":0.9627,"recall10in100":0.999},{"co":"web","ds":"img_siglip2","cd":"rabitq","m":10,"dim":1152,"cb":144,"qz":1,"recall10":1.0,"recall100":0.9919,"recall10in100":1.0},{"co":"web","ds":"img_siglip2","cd":"turboquant","m":1,"dim":1152,"cb":288,"qz":1,"recall10":0.983,"recall100":0.6529,"recall10in100":0.983},{"co":"web","ds":"img_siglip2","cd":"turboquant","m":5,"dim":1152,"cb":288,"qz":1,"recall10":1.0,"recall100":0.9694,"recall10in100":1.0},{"co":"web","ds":"img_siglip2","cd":"turboquant","m":10,"dim":1152,"cb":288,"qz":1,"recall10":1.0,"recall100":0.9943,"recall10in100":1.0},{"co":"web","ds":"txt_bge_large","cd":"rabitq","m":1,"dim":1024,"cb":128,"qz":1,"recall10":0.988,"recall100":0.6457,"recall10in100":0.988},{"co":"web","ds":"txt_bge_large","cd":"rabitq","m":5,"dim":1024,"cb":128,"qz":1,"recall10":1.0,"recall100":0.9707,"recall10in100":1.0},{"co":"web","ds":"txt_bge_large","cd":"rabitq","m":10,"dim":1024,"cb":128,"qz":1,"recall10":1.0,"recall100":0.995,"recall10in100":1.0},{"co":"web","ds":"txt_bge_large","cd":"turboquant","m":1,"dim":1024,"cb":256,"qz":1,"recall10":0.992,"recall100":0.6991,"recall10in100":0.992},{"co":"web","ds":"txt_bge_large","cd":"turboquant","m":5,"dim":1024,"cb":256,"qz":1,"recall10":1.0,"recall100":0.989,"recall10in100":1.0},{"co":"web","ds":"txt_bge_large","cd":"turboquant","m":10,"dim":1024,"cb":256,"qz":1,"recall10":1.0,"recall100":0.9992,"recall10in100":1.0}];
+const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'Recall 10-in-100' };
+const CORPORA = { photos:'Photos', web:'Web', hn:'HackerNews' };
+const CODECS = ['rabitq', 'turboquant'];
+const CODEC_LABEL = { rabitq:'RaBitQ', turboquant:'TurboQuant' };
+const MULTS = [...new Set(DATA.map(r => r.m))].sort((a,b)=>a-b);
+let st = { me:'recall100' };
+const color = v => v==null ? '#222' : `hsl(${(v*120).toFixed(0)},75%,50%)`;
+const fmtB = n => n < 1024 ? n+'B' : (n/1024).toFixed(1).replace(/\.0$/,'')+'K';
+const cellKey = (co,ds,cd,m) => `${co}|${ds}|${cd}|${m}`;
+function buildSwitch(el, keys, cur, onPick, labels) {
+  el.innerHTML = '';
+  keys.forEach(k => {
+    const s = document.createElement('span');
+    s.className = 'opt' + (k===cur ? ' sel' : '');
+    s.textContent = labels ? labels[k] : k;
+    s.onclick = () => { [...el.children].forEach(c => c.classList.remove('sel')); s.classList.add('sel'); onPick(k); };
+    el.appendChild(s);
+  });
+}
+function render() {
+  const m = {}; DATA.forEach(r => m[cellKey(r.co,r.ds,r.cd,r.m)] = r);
+  // model rows, grouped by corpus, in the order the corpora appear in CORPORA
+  const models = [];
+  for (const co of Object.keys(CORPORA))
+    for (const ds of [...new Set(DATA.filter(r => r.co===co).map(r => r.ds))]) models.push([co, ds]);
+
+  let h = `<table><caption>${METRICS[st.me]} &middot; k = 100 &middot; ~100k-row pool &middot; 20 queries</caption>`;
+  h += '<tr><th></th>' + CODECS.map(c => `<th class=grp colspan="${MULTS.length}">${CODEC_LABEL[c]}</th>`).join('') + '</tr>';
+  h += '<tr><th class=cor>model&nbsp;\\&nbsp;multiplier</th>'
+     + CODECS.map(() => MULTS.map(x => `<th>&times;${x}</th>`).join('')).join('') + '</tr>';
+  let lastCo = null;
+  for (const [co, ds] of models) {
+    if (co !== lastCo) { h += `<tr><th class=cs colspan="${1 + CODECS.length*MULTS.length}">${CORPORA[co]}</th></tr>`; lastCo = co; }
+    h += `<tr><th class=cor>${ds}</th>`;
+    for (const cd of CODECS) for (const x of MULTS) {
+      const r = m[cellKey(co,ds,cd,x)];
+      if (!r) { h += '<td class=na>&mdash;</td>'; continue; }
+      const v = r[st.me];
+      const flag = r.qz ? '' : ' &#9888;';
+      h += `<td class=cell data-k="${cellKey(co,ds,cd,x)}" data-v="${v}" data-cb="${r.cb}"`
+         + ` style="background:${color(v)}"`
+         + ` title="${CORPORA[co]} / ${ds} · ${CODEC_LABEL[cd]} · multiplier ${x} · ${r.dim}d · ${fmtB(r.cb)}/vector${r.qz?'':' · NOT quantized'}">`
+         + `${v.toFixed(3)}${flag}<span class=sz>${fmtB(r.cb)}</span></td>`;
+    }
+    h += '</tr>';
+  }
+  h += '</table>';
+  document.getElementById('tbl').innerHTML = h;
+  const bad = DATA.filter(r => !r.qz);
+  document.getElementById('warn').innerHTML = bad.length
+    ? `&#9888; ${bad.length} config(s) did not use the quantized codes (full-precision fallback) &mdash; their recall is not meaningful.`
+    : '';
+  alignLeft();
+}
+buildSwitch(document.getElementById('sw-me'), Object.keys(METRICS), st.me, k => { st.me=k; render(); }, METRICS);
+render();
+const _tbl = document.getElementById('tbl');
+const _legval = document.getElementById('legval');
+// align the legend left edge with the first VALUE column (past the row-header column)
+function alignLeft(){
+  const t = document.querySelector('#tbl table'); if (!t || !t.rows[1] || !t.rows[1].cells[1]) return;
+  const pad = (t.rows[1].cells[1].getBoundingClientRect().left - t.getBoundingClientRect().left) + 'px';
+  document.querySelector('.legend').style.paddingLeft = pad;
+}
+window.addEventListener('resize', alignLeft);
+// dim cells below the threshold; among those at/above it, outline the single best recall-per-code-byte cell
+const applyThreshold = v => {
+  let best = null, bestRatio = -Infinity;
+  _tbl.querySelectorAll('td.cell').forEach(td => {
+    const val = +td.dataset.v;
+    td.classList.toggle('dim', val < v);
+    td.classList.remove('best');
+    if (val >= v) { const ratio = val / +td.dataset.cb; if (ratio > bestRatio) { bestRatio = ratio; best = td; } }
+  });
+  if (best) best.classList.add('best');
+};
+const _clear = () => { _tbl.querySelectorAll('td.cell.dim,td.cell.best').forEach(td => td.classList.remove('dim','best')); _legval.textContent = ''; };
+_tbl.addEventListener('mouseover', e => { const c = e.target.closest('td.cell'); if (!c) { _clear(); return; } applyThreshold(+c.dataset.v); });
+_tbl.addEventListener('mouseleave', _clear);
+const _bar = document.getElementById('bar');
+_bar.addEventListener('mousemove', e => {
+  const r = _bar.getBoundingClientRect();
+  const v = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  applyThreshold(v); _legval.textContent = '≥ ' + v.toFixed(2);
+});
+_bar.addEventListener('mouseleave', _clear);
+</script></body></html>

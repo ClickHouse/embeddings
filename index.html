@@ -182,14 +182,31 @@ const DATASETS = {
     clip:    { table: 'mmcommons.emb_clip',    dim: 768,  rdim: 768,  q99: 378, uq99: 2343 },
     nomic:   { table: 'mmcommons.emb_nomic',   dim: 768,  rdim: 768,  q99: 378, uq99: 1914 },
 };
-/// The 4 QBit representation columns (type x rotation). Report similarity uses ONLY these via
-/// cosineDistanceTransposed(qbit, ref[dims], bits, dims). The QBit dim is dataset-aware (see qbitInfo).
-const QBIT = {
-    'BFloat16|original': { col: 'embedding_strided',     rot: false },
-    'BFloat16|rotated':  { col: 'embedding_rotated',     rot: true  },
-    'Int8|original':     { col: 'embedding_int',         rot: false },
-    'Int8|rotated':      { col: 'embedding_rotated_int', rot: true  },
+/// Report similarity representations, keyed `type|rotation`. Two families:
+///
+/// QBit reps (BFloat16/Int8 x original/rotated) are COLUMNS on the model's emb table. Their distance is exact and
+/// evaluated on every row, so `ORDER BY dist, key` is a total order and `LIMIT off, cnt` is a real window into one
+/// fixed sequence -- page 2 provably continues page 1, which is what makes infinite scroll correct. The QBit dim is
+/// dataset-aware (see qbitInfo); `bits`/`dims` truncate the read to the top bit planes.
+///
+/// Codec reps (RaBitQ/TurboQuant) are SEPARATE TABLES whose `embedding` carries CODEC(Quantized(...)) -- that codec is
+/// CREATE TABLE-only, so they cannot be extra columns on the emb table. Their scan is an approximate two-stage
+/// top-k: the candidate pool is sized from the LIMIT, so it differs between pages and page 2 is NOT guaranteed to
+/// continue page 1 -> no infinite scroll; they load one fixed top-k (rep.k). They exist only for the models listed in
+/// CODEC_MODELS, so `avail` gates the chips and clampRep() resets the rep when the model switches away.
+const REPS = {
+    'BFloat16|original':  { col: 'embedding_strided',     rot: false },
+    'BFloat16|rotated':   { col: 'embedding_rotated',     rot: true  },
+    'Int8|original':      { col: 'embedding_int',         rot: false },
+    'Int8|rotated':       { col: 'embedding_rotated_int', rot: true  },
+    'RaBitQ|rotated':     { codec: true, suffix: 'rabitq',     avail: () => hasCodec() },
+    'TurboQuant|rotated': { codec: true, suffix: 'turboquant',  avail: () => hasCodec() },
 };
+/// Models that have the two codec sibling tables built, as `<emb table>_{rabitq,turboquant}`
+/// (e.g. mmcommons.emb_nomic -> mmcommons.emb_nomic_rabitq). Add a model here once both are loaded.
+const CODEC_MODELS = { photos: ['siglip2', 'nomic', 'clip'], web: ['img_siglip2', 'txt_bge_large'],
+                       hn: ['nomic', 'bge_large'] };
+const hasCodec = () => (CODEC_MODELS[corpus] || []).includes(dataset);
 let corpus = 'photos';    /// 'photos' (YFCC/Multimedia-Commons images) | 'hn' (HackerNews comments)
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
@@ -336,8 +353,10 @@ let md5ToTagSpans = new Map();   /// md5 -> [its tag <span>s], for thumbnail-hov
 let repLoading = false; /// a scan is in flight (guards scroll-triggered load-more)
 let repMore = true;     /// more results may exist (the last batch was full)
 const MAX_RESULTS = 3000;   /// safety cap on rendered thumbnails
-/// report similarity config — default: Int8, rotated, 2 bits, 384 dims (fast, coarse first pass)
-let rep = { type: 'Int8', rot: 'rotated', bits: 2, dims: 384 };
+/// report similarity config — default: Int8, rotated, 2 bits, 384 dims (fast, coarse first pass).
+/// bits/dims apply to the QBit reps; mult (candidate over-fetch) and k (the single fixed top-k they load,
+/// since they cannot page) to the codec reps -- see REPS.
+let rep = { type: 'Int8', rot: 'rotated', bits: 2, dims: 384, mult: 1, k: 100 };
 /// Map projection: linear uses the emb_<ds> table (x,y,z); UMAP uses umap_<ds>_2d (mx,my,mz).
 /// The similarity SEARCH always runs on the emb table (umap tables have no embeddings).
 function projCfg() {
@@ -349,9 +368,26 @@ function projCfg() {
 }
 const curTable = () => projCfg().table;
 /// QBit dim is dataset-aware: rotated cols use the dataset's rotated dim (rdim), others its original dim.
-const qbitInfo = () => { const q = QBIT[`${rep.type}|${rep.rot}`], d = curModel(); return { col: q.col, dim: q.rot ? d.rdim : d.dim }; };
+const repCfg = () => REPS[`${rep.type}|${rep.rot}`] || REPS['Int8|rotated'];
+const isCodecRep = () => !!repCfg().codec;
+/// is this rep TYPE offered for the current corpus/model? (codec reps: only the CODEC_MODELS entries)
+const repAvail = t => { const c = REPS[`${t}|rotated`] || REPS[`${t}|original`]; return !!c && (!c.avail || c.avail()); };
+const qbitInfo = () => { const q = repCfg(), d = curModel(); return { col: q.col, dim: q.rot ? d.rdim : d.dim }; };
 const repMaxBits = () => rep.type === 'Int8' ? 8 : 16;
 const repMaxDims = () => qbitInfo().dim;
+/// Fall back to a QBit rep when the selected one isn't available here (e.g. the model switched to one with no
+/// codec tables), and pin rotation to the slot the rep actually exists in.
+function clampRep() {
+    if (!repAvail(rep.type)) { rep.type = 'Int8'; rep.rot = 'rotated'; }
+    if (!REPS[`${rep.type}|${rep.rot}`]) rep.rot = 'rotated';
+}
+/// Search target for the report scan: QBit reps scan a COLUMN of the model's emb table, codec reps their own table.
+/// The map (tiles, hue range, hover, 3D preview) goes through projCfg()/C().emb() and must NOT be routed here.
+function searchCfg() {
+    const r = repCfg();
+    return r.codec ? { codec: true, table: `${C().emb(dataset)}_${r.suffix}`, col: 'embedding' }
+                   : { codec: false, table: C().emb(dataset), col: r.col };
+}
 
 /// ---- ClickHouse HTTP ----
 /// Every query goes through here. query_cache_nondeterministic_function_handling=save: the users' profiles keep the
@@ -1099,6 +1135,7 @@ async function hoverPreview(latlng, cp) {
 function showReport(md5) {
     const changed = md5 !== curReport;                       /// new/re-targeted image vs same target (e.g. dataset switch)
     curReport = md5;
+    clampRep();                                    /// model may lack codec tables -> drop a codec rep
     rep.bits = Math.min(rep.bits, repMaxBits());   /// clamp to current type/rotation
     rep.dims = Math.min(rep.dims, repMaxDims());
     document.getElementById('report').style.display = 'block';
@@ -1138,29 +1175,50 @@ function buildReportShell() {
     document.getElementById('report-body').innerHTML =
         `<div id="rep-head">
            <span class="close" onclick="hideReport()">✕</span>
-           <h3 id="rc-title"><span id="rc-count">Top-100 similar</span> | <a class="qcmp" href="recall.html">Quality comparison &#8599;</a></h3>
+           <h3 id="rc-title"><span id="rc-count">Top-100 similar</span> | <a class="qcmp" id="rc-qcmp" href="recall.html">Quality comparison &#8599;</a></h3>
            <div>query: <span id="rc-query"></span></div>
            <div class="repctl">
              <div><label>type</label><span id="rc-type"></span></div>
-             <div><label>rotation</label><span id="rc-rot"></span></div>
-             <div><label>bits</label><span id="rc-bits"></span></div>
-             <div><label>dims</label><span id="rc-dims"></span></div>
+             <div id="rc-rot-w"><label>rotation</label><span id="rc-rot"></span></div>
+             <div id="rc-bits-w"><label>bits</label><span id="rc-bits"></span></div>
+             <div id="rc-dims-w"><label>dims</label><span id="rc-dims"></span></div>
+             <div id="rc-k-w"><label>nearest</label><span id="rc-k"></span></div>
+             <div id="rc-mult-w"><label>multiplier</label><span id="rc-mult"></span></div>
            </div>
            <div id="rep-progress"><div></div></div>
            <div id="rep-stats" class="repstats"></div>
          </div>
          <div id="grid"></div>`;
-    buildSwitch('rc-type', ['BFloat16', 'Int8'],    rep.type, v => { rep.type = v; switchRep(); });
-    buildSwitch('rc-rot',  ['original', 'rotated'], rep.rot,  v => { rep.rot  = v; switchRep(); });
 }
-/// bits/dims ranges depend on type & rotation, so rebuild them on every switch
+/// Rebuild the whole control row on every switch: the offered TYPES depend on corpus/model (codec reps only exist
+/// for the CODEC_MODELS entries), and which rows apply depends on the rep family -- QBit reps get
+/// rotation/bits/dims, codec reps get nearest/multiplier (they have no bit-plane or dim truncation, and cannot page).
+const showCtl = (id, on) => { const e = document.getElementById(id); if (e) e.style.display = on ? 'flex' : 'none'; };
 function buildRepScales() {
+    buildSwitch('rc-type', ['BFloat16', 'Int8', 'RaBitQ', 'TurboQuant'].filter(repAvail), rep.type,
+        v => { rep.type = v; switchRep(); });
+    const codec = isCodecRep();
+    /// the two families are measured by different harnesses -> point the header link at the matching page
+    const qc = document.getElementById('rc-qcmp');
+    if (qc) {
+        qc.href = codec ? 'recall_codecs.html' : 'recall.html';
+        qc.innerHTML = codec ? 'Quality comparison (codecs) &#8599;' : 'Quality comparison &#8599;';
+    }
+    showCtl('rc-rot-w', !codec); showCtl('rc-bits-w', !codec); showCtl('rc-dims-w', !codec);
+    showCtl('rc-k-w', codec); showCtl('rc-mult-w', codec);
+    if (codec) {
+        buildSwitch('rc-k',    [10, 100, 1000], rep.k, v => { rep.k    = +v; switchRep(); });
+        buildSwitch('rc-mult', [1, 5, 10], rep.mult, v => { rep.mult = +v; switchRep(); });
+        return;
+    }
+    buildSwitch('rc-rot', ['original', 'rotated'], rep.rot, v => { rep.rot = v; switchRep(); });
     buildSwitch('rc-bits', Array.from({length: repMaxBits()}, (_, i) => i + 1), rep.bits, v => { rep.bits = +v; switchRep(); });
     const dims = []; for (let d = 128; d <= Math.min(repMaxDims(), 2048); d += 128) dims.push(d);   /// cap chips (bow is 8192-d)
     buildSwitch('rc-dims', dims, rep.dims, v => { rep.dims = +v; switchRep(); });
 }
 /// Switch representation on the SAME target — keeps the current pictures dimmed until the new load.
 function switchRep() {
+    clampRep();                                       /// codec reps live only in the 'rotated' slot
     rep.bits = Math.min(rep.bits, repMaxBits());
     rep.dims = Math.min(rep.dims, repMaxDims());
     buildRepScales();
@@ -1315,14 +1373,17 @@ async function attachHNMeta(rows) {
         for (const r of rows) { const m = meta.get(String(r.md5)); if (m) { r.by = m.by; r.text = m.text; r.ts = m.ts; } }
     } catch (e) { /* leave rows without meta -> cards render fallbacks */ }
 }
-/// the next page (OFFSET repLoaded) for infinite scroll. Streams JSONEachRowWithProgress for the bar.
+/// QBit reps: the next page (OFFSET repLoaded) for infinite scroll. Codec reps: always the single top-k.
+/// Streams JSONEachRowWithProgress for the bar.
 async function runSimilar(more) {
-    const table = C().emb(dataset), col = qbitInfo().col, md5 = curReport;   /// SEARCH always on emb (umap has no embeddings)
+    const s = searchCfg(), table = s.table, col = s.col, md5 = curReport;   /// QBit: emb column; codec: own table
     /// Int8 columns use the Quantized distance; BFloat16 use the plain transposed distance.
     const fn = rep.type === 'Int8' ? 'cosineDistanceTransposedQuantized' : 'cosineDistanceTransposed';
     const grid = document.getElementById('grid'), stats = document.getElementById('rep-stats');
     const bar = document.getElementById('rep-progress'), barFill = bar.firstElementChild;
-    const off = more ? repLoaded : 0, cnt = (more ? repTarget - repLoaded : repTarget);
+    if (s.codec && more) return;                    /// codec reps: one fixed top-k, no load-more (see REPS)
+    const off = s.codec ? 0 : (more ? repLoaded : 0);
+    const cnt = s.codec ? rep.k : (more ? repTarget - repLoaded : repTarget);
     if (cnt <= 0) return;
     const seq = ++repSeq;
     repLoading = true;
@@ -1334,8 +1395,10 @@ async function runSimilar(more) {
         else grid.replaceChildren(...(isHN() ? [] : [thumbImg(md5, true)]));   /// HN: header shows the query comment
     }
     bar.style.display = 'block'; barFill.style.width = '0%';
-    stats.textContent = more ? 'loading more…' : `running: ${col} · ${rep.bits} bits · ${rep.dims} dims…`;
-    setStatus(more ? 'loading more…' : `top: ${col} · ${rep.bits}b · ${rep.dims}d…`);
+    const desc = s.codec ? `${rep.type} · nearest ${rep.k} · ${rep.mult}× multiplier`
+                         : `${col} · ${rep.bits} bits · ${rep.dims} dims`;
+    stats.textContent = more ? 'loading more…' : `running: ${desc}…`;
+    setStatus(more ? 'loading more…' : `top: ${s.codec ? rep.type + ' ' + rep.k + '/' + rep.mult + '×' : col + ' ' + rep.bits + 'b ' + rep.dims + 'd'}…`);
     try {
         const total = await tableRows(table);               /// bar denominator (progress.total_rows_to_read is unreliable w/ parallel replicas)
         if (seq !== repSeq) return;
@@ -1348,14 +1411,27 @@ async function runSimilar(more) {
         const sel = isHN() || corpus === 'web'
             ? `toString(${KEY()}) AS md5, x, y`   /// HN: author/text/date fetched from default.hackernews after ranking (works for models w/o inline meta, e.g. bow)
             : `md5, x, y`;
-        const sql = `WITH (SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1) AS q
+        /// Codec reps take the whole vector as the query (no dims truncation) and rank with a plain cosineDistance.
+        const qsub = s.codec
+            ? `(SELECT ${col} FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1)`
+            : `(SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1)`;
+        const dist = s.codec ? `cosineDistance(${col}, q)` : `${fn}(${col}, q, {bits:UInt8}, {dims:UInt32})`;
+        /// QBit reps need the key tiebreak + OFFSET for consistent paging; codec reps never page, and only the bare
+        /// `ORDER BY <distance> LIMIT k` shape is recognised, so they get neither.
+        const tail = s.codec ? `ORDER BY ${dist} ASC
+            LIMIT {cnt:UInt32}` : `ORDER BY ${dist} ASC, ${KEY()} ASC
+            LIMIT {off:UInt32}, {cnt:UInt32}`;
+        const sql = `WITH ${qsub} AS q
             SELECT ${sel} FROM ${table}
             WHERE ${KEY()} != {k:${C().keyType}}
-            ORDER BY ${fn}(${col}, q, {bits:UInt8}, {dims:UInt32}) ASC, ${KEY()} ASC
-            LIMIT {off:UInt32}, {cnt:UInt32} FORMAT JSONEachRowWithProgress`;
+            ${tail} FORMAT JSONEachRowWithProgress`;
         /// BFloat16 cosineDistanceTransposed + scalar arg + parallel replicas hits a CH bug -> disable PR for it; Int8 ok
         const noPR = rep.type === 'BFloat16' ? '&enable_parallel_replicas=0' : '';
-        const url = chURL(`replace_running_query=1${noPR}` +
+        const vs = s.codec
+            ? `&vector_search_use_quantized_codes=1&vector_search_index_fetch_multiplier=${rep.mult}` +
+              `&query_plan_max_limit_for_lazy_materialization=10000&enable_parallel_replicas=0`
+            : '';
+        const url = chURL(`replace_running_query=1&use_query_cache=0${noPR}${vs}` +
             `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`);
         const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
         if (!resp.ok) throw new Error(await resp.text());
@@ -1401,7 +1477,7 @@ async function runSimilar(more) {
             repMd5s = rows.map(r => r.md5); lastRows = rows.slice();
         }
         (isHN() ? updateTokenCloud : updateTagCloud)();                    /// refresh the cloud over the map (HN: contrasting tokens; Photos: user tags)
-        repMore = rows.length === cnt && repLoaded < MAX_RESULTS;          /// full batch -> more may exist
+        repMore = !s.codec && rows.length === cnt && repLoaded < MAX_RESULTS;   /// full batch -> more may exist; codec reps never page
         hideError();
         document.getElementById('rc-count').textContent = `Top-${repLoaded} similar`;
         const secs = (+(prog && prog.elapsed_ns) || 0) / 1e9, rr = +(prog && prog.read_rows) || 0, rb = +(prog && prog.read_bytes) || 0;
@@ -1658,6 +1734,8 @@ if (urlp.get('type')) rep.type = urlp.get('type');
 if (urlp.get('rot')) rep.rot = urlp.get('rot');
 if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
 if (+urlp.get('dims')) rep.dims = +urlp.get('dims');
+if (+urlp.get('mult')) rep.mult = +urlp.get('mult');
+if (+urlp.get('k')) rep.k = +urlp.get('k');
 
 /// The model / mode / projection switches depend on the current corpus, so they are (re)built on a corpus change.
 function buildModelSwitch() {
@@ -1998,7 +2076,7 @@ addEventListener('keydown', (e) => { if (e.key === 'Escape' && reportActive) hid
 /// "Significant" state (dataset, mode, projection, open report + its params) makes a NEW history entry so
 /// Back/Forward step through those; view-only changes (pan/zoom/rotation) and Back/Forward restores update
 /// the current entry in place (replaceState) — so scrolling around doesn't flood history.
-function sigOf(p) { return ['corpus', 'ds', 'mode', 'proj', 'md5', 'type', 'rot', 'bits', 'dims'].map(k => p.get(k) || '').join('|'); }
+function sigOf(p) { return ['corpus', 'ds', 'mode', 'proj', 'md5', 'type', 'rot', 'bits', 'dims', 'mult', 'k'].map(k => p.get(k) || '').join('|'); }
 let lastSig = null, restoring = false;
 function updateURL() {
     const c = latlngToData(map.getCenter());
@@ -2008,7 +2086,8 @@ function updateURL() {
     p.set('z', Math.round(map.getZoom())); p.set('x', c.x); p.set('y', c.y);
     if (reportActive && curReport) {
         p.set('md5', curReport); p.set('type', rep.type); p.set('rot', rep.rot);
-        p.set('bits', rep.bits); p.set('dims', rep.dims);
+        if (isCodecRep()) { p.set('mult', rep.mult); p.set('k', rep.k); }
+        else { p.set('bits', rep.bits); p.set('dims', rep.dims); }
     }
     const hash = '#' + p.toString(), sig = sigOf(p);
     if (!restoring && lastSig !== null && sig !== lastSig) history.pushState(null, '', hash);   /// discrete change -> new entry
@@ -2045,6 +2124,8 @@ function applyState(urlp) {
         if (urlp.get('rot')) rep.rot = urlp.get('rot');
         if (+urlp.get('bits')) rep.bits = +urlp.get('bits');
         if (+urlp.get('dims')) rep.dims = +urlp.get('dims');
+        if (+urlp.get('mult')) rep.mult = +urlp.get('mult');
+        if (+urlp.get('k')) rep.k = +urlp.get('k');
         set3DMode(is3D());
         if (dsChanged) makeLayer(); else { applyMode(); redraw(); }
         const md5 = urlp.get('md5');
