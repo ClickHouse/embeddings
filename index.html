@@ -124,6 +124,24 @@
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #full-meta:empty { background: transparent; }   /* keep the reserved space but stay invisible until author/license loads */
     #full-meta .lic { color: #8bc34a; }
+    /* "SQL" popup: the exact statement + settings of the last report scan. Centred in the MAP region --
+       the one reliably free area (the header owns the top, #tagcloud the top strip, #full the bottom-left). */
+    #sqlbox { position: absolute; top: 50%; left: 10px; right: 10px; transform: translateY(-50%);
+        z-index: 1003; display: none; max-width: 900px; margin: 0 auto;
+        background: rgba(12,12,12,.97); border: 2px solid #ff0; border-radius: 4px;
+        box-shadow: 0 0 40px #000; max-height: 76vh; flex-direction: column; }
+    body.report-open #sqlbox { right: calc(min(40%, 640px) + 10px); }   /* stay inside the shrunken map */
+    #sqlbox.on { display: flex; }
+    #sqlbox header { display: flex; align-items: center; gap: .6em; padding: .4em .6em;
+        border-bottom: 1px solid #333; color: #ff0; font-size: 13px; }
+    #sqlbox header .sp { margin-left: auto; }
+    #sqlbox .btn { cursor: pointer; color: #8bc34a; border: 1px solid #333; border-radius: 3px;
+        padding: .1em .5em; user-select: none; font-size: 12px; }
+    #sqlbox .btn:hover { background: #ff0; color: #000; }
+    #sqlbox .x { cursor: pointer; color: #f66; font-size: 17px; line-height: 1; }
+    #sqlbox pre { margin: 0; padding: .6em; overflow: auto; font-size: 12px; line-height: 1.35;
+        color: #ddd; white-space: pre; user-select: text; }
+    #sqlbox pre b { color: #8bc34a; font-weight: normal; }   /* settings block */
     #error { position: absolute; bottom: 0; left: 0; right: 0; z-index: 1004; color: #fff;
         background: #900; padding: .5em; font-family: monospace; white-space: pre-wrap; display: none; }
     a { color: #90caf9; }
@@ -158,6 +176,9 @@
 <div id="full"><img id="full-img"><div id="full-comment"></div><div id="full-meta"></div></div>
 <img id="hover">
 <div id="hovertags"></div>
+
+<div id="sqlbox"><header><b>last report query</b>
+    <span class="sp btn" id="sql-copy">copy</span><span class="x" id="sql-close">&#10005;</span></header><pre id="sql-pre"></pre></div>
 
 <div id="error"></div>
 <script>
@@ -1175,7 +1196,7 @@ function buildReportShell() {
     document.getElementById('report-body').innerHTML =
         `<div id="rep-head">
            <span class="close" onclick="hideReport()">✕</span>
-           <h3 id="rc-title"><span id="rc-count">Top-100 similar</span> | <a class="qcmp" id="rc-qcmp" href="recall.html">Quality comparison &#8599;</a></h3>
+           <h3 id="rc-title"><span id="rc-count">Top-100 similar</span> | <a class="qcmp" href="#" onclick="showSQL(); return false;">SQL</a> | <a class="qcmp" id="rc-qcmp" href="recall.html">Quality comparison &#8599;</a></h3>
            <div>query: <span id="rc-query"></span></div>
            <div class="repctl">
              <div><label>type</label><span id="rc-type"></span></div>
@@ -1431,8 +1452,10 @@ async function runSimilar(more) {
             ? `&vector_search_use_quantized_codes=1&vector_search_index_fetch_multiplier=${rep.mult}` +
               `&query_plan_max_limit_for_lazy_materialization=10000&enable_parallel_replicas=0`
             : '';
-        const url = chURL(`replace_running_query=1&use_query_cache=0${noPR}${vs}` +
-            `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`);
+        const extra = `replace_running_query=1&use_query_cache=0${noPR}${vs}` +
+            `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`;
+        lastQuery = { sql, extra, table };                  /// for the SQL popup (showSQL)
+        const url = chURL(extra);
         const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
         if (!resp.ok) throw new Error(await resp.text());
         const reader = resp.body.getReader(), decoder = new TextDecoder();
@@ -1500,6 +1523,44 @@ async function runSimilar(more) {
         }
     }
 }
+/// ---- "SQL" popup ----------------------------------------------------------------------------------
+/// Shows the statement runSimilar last POSTed, verbatim, plus the query-string settings it carried (which
+/// is where the rep family actually differs -- vector_search_* and the parallel-replicas switch live there,
+/// not in the SQL). Parameters are listed rather than interpolated, so what is shown is exactly what was
+/// sent; `copy` emits a clickhouse-client-ready form with --param_ flags.
+let lastQuery = null;
+const SQL_SKIP = new Set(['replace_running_query']);   /// transport-only, not interesting
+function sqlParts() {
+    if (!lastQuery) return null;
+    const pairs = lastQuery.extra.split('&').map(kv => {
+        const i = kv.indexOf('='); return [kv.slice(0, i), decodeURIComponent(kv.slice(i + 1))];
+    }).filter(([k]) => k && !SQL_SKIP.has(k));
+    return { sql: lastQuery.sql.trim(),
+             params: pairs.filter(([k]) => k.startsWith('param_')),
+             settings: pairs.filter(([k]) => !k.startsWith('param_')) };
+}
+function showSQL() {
+    const p = sqlParts(), pre = document.getElementById('sql-pre');
+    if (!p) { pre.textContent = 'no report query has run yet'; }
+    else {
+        const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        pre.innerHTML = esc(p.sql)
+            + '\n\n<b>-- parameters</b>\n'  + p.params.map(([k, v]) => esc(`--   ${k.slice(6)} = ${v}`)).join('\n')
+            + '\n\n<b>-- settings</b>\n'    + p.settings.map(([k, v]) => esc(`--   ${k} = ${v}`)).join('\n');
+    }
+    document.getElementById('sqlbox').classList.add('on');
+}
+function hideSQL() { document.getElementById('sqlbox').classList.remove('on'); }
+const sqlOpen = () => document.getElementById('sqlbox').classList.contains('on');
+document.getElementById('sql-close').onclick = hideSQL;
+document.getElementById('sql-copy').onclick = function () {
+    const p = sqlParts(); if (!p) return;
+    const text = p.settings.map(([k, v]) => `-- ${k} = ${v}`).join('\n') + '\n'
+        + p.params.map(([k, v]) => `--param_${k.slice(6)}='${v}'`).join(' ') + '\n\n' + p.sql + '\n';
+    navigator.clipboard.writeText(text).then(() => {
+        this.textContent = 'copied'; setTimeout(() => { this.textContent = 'copy'; }, 1200);
+    });
+};
 /// infinite scroll: near the bottom of the panel, request 2x more results
 document.getElementById('report').addEventListener('scroll', function () {
     if (repLoading || !repMore || !curReport) return;
@@ -1629,7 +1690,7 @@ function cancelPreview() { if (previewTimer) { clearTimeout(previewTimer); previ
 function schedulePreview(key) { cancelPreview(); previewTimer = setTimeout(() => { previewTimer = null; previewImg(key); }, PREVIEW_DELAY); }
 function hidePreview() { cancelPreview(); previewKey = null; document.getElementById('full').style.display = 'none'; document.getElementById('full-meta').textContent = ''; }
 function hideReport() {
-    document.getElementById('report').style.display = 'none'; hidePreview(); layoutForReport(false);
+    document.getElementById('report').style.display = 'none'; hidePreview(); hideSQL(); layoutForReport(false);
     reportActive = false; clearOverlay(); if (map.hasLayer(topkLayer)) map.removeLayer(topkLayer);
     repMd5s = []; tagSeq++; document.getElementById('tagcloud').style.display = 'none';   /// clear the tag cloud
     applyMode();                                             /// restore the thumbnail overlay (point cloud untouched)
@@ -2070,7 +2131,11 @@ function offsetControls() {
 }
 offsetControls();
 addEventListener('resize', () => { offsetControls(); if (reportActive) fitPanelWidth(); });
-addEventListener('keydown', (e) => { if (e.key === 'Escape' && reportActive) hideReport(); });   /// Esc closes the top-K panel
+addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (sqlOpen()) hideSQL();                /// popup first, so Esc doesn't also close the report under it
+    else if (reportActive) hideReport();
+});   /// Esc closes the top-K panel
 
 /// ---- URL hash <-> history + zoom label (defined before the restore below, which calls updateURL) ----
 /// "Significant" state (dataset, mode, projection, open report + its params) makes a NEW history entry so
