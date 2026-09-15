@@ -3,19 +3,19 @@
 # from results/recall_codecs.csv (written by scripts/recall_codecs_bench.py).
 #
 # Sibling of build_recall_html.py. Same palette and controls on purpose, but a different grid: the QBit
-# page is bits x dims for one (model, type, rotation); this one is model x (codec, multiplier), since the
-# codec reps have no bit-plane or dim truncation -- their only knob is the candidate over-fetch.
+# page is bits x dims for one (model, type, rotation); this one is model x (codec, multiplier) with k on a
+# switch, because the codec reps have no bit-plane or dim truncation -- their knobs are k and the
+# candidate over-fetch, exactly the two chips the Explorer shows.
 import csv, json, os
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 rows = []
 for r in csv.DictReader(open(os.path.join(BASE, 'results/recall_codecs.csv'))):
-    if not r['recall100']:
+    if not r['recall_at_k']:
         continue
     rows.append({'co': r['corpus'], 'ds': r['dataset'], 'cd': r['codec'],
-                 'm': int(r['multiplier']), 'dim': int(r['dim']), 'cb': int(r['code_bytes']),
-                 'qz': int(r['quantized']),
-                 'recall10': float(r['recall10']), 'recall100': float(r['recall100']),
-                 'recall10in100': float(r['recall10in100'])})
+                 'k': int(r['k']), 'm': int(r['multiplier']), 'ca': int(r['candidates']),
+                 'dim': int(r['dim']), 'cb': int(r['code_bytes']), 'qz': int(r['quantized']),
+                 'recall_at_k': float(r['recall_at_k']), 'recall10': float(r['recall10'])})
 data = json.dumps(rows, separators=(',', ':'))
 json.dump(rows, open(os.path.join(BASE, 'results/recall_codecs.json'), 'w'), separators=(',', ':'))
 
@@ -58,10 +58,15 @@ HTML = r'''<!doctype html><html lang=en><head><meta charset=utf-8>
 <div class=sub><a href="index.html">&#8592; Embeddings Explorer</a> &middot; <a href="recall.html">QBit recall &#8599;</a><br>
 Brute-force two-stage search over an <code>Array(BFloat16) CODEC(Quantized(&hellip;))</code> column: scan the
 quantized codes, keep k&nbsp;&times;&nbsp;multiplier candidates, then rescore those against the full-precision
-vectors. Recall is measured against exact-cosine ground truth on the same ~100k-row pool, 20 random queries,
-k&nbsp;=&nbsp;100. Green = 1.0, red = 0.0. The second line in each cell is the code size per vector
-(1&nbsp;bit/dim for RaBitQ, 2&nbsp;bits/dim for TurboQuant).</div>
+vectors. Measured against exact-cosine ground truth on a ~100k-row pool (deduplicated by vector), 100 random
+queries. Green = 1.0, red = 0.0. Second line in each cell is the code size per vector (1&nbsp;bit/dim for
+RaBitQ, 2&nbsp;bits/dim for TurboQuant).<br>
+<b>Recall follows the candidate pool, k&nbsp;&times;&nbsp;multiplier &mdash; not the multiplier alone.</b>
+k&nbsp;=&nbsp;10&nbsp;&times;10 and k&nbsp;=&nbsp;100&nbsp;&times;1 both fetch 100 candidates and score alike;
+k&nbsp;=&nbsp;10&nbsp;&times;1 fetches 10 and scores far worse. So read the <i>k</i> rows separately &mdash;
+the Explorer's default is k&nbsp;=&nbsp;100, multiplier&nbsp;&times;1.</div>
 <div class=ctl>
+  <div><label>nearest (k)</label><span id=sw-k></span></div>
   <div><label>metric</label><span id=sw-me></span></div>
 </div>
 <div id=tbl></div>
@@ -70,15 +75,16 @@ k&nbsp;=&nbsp;100. Green = 1.0, red = 0.0. The second line in each cell is the c
 <div class=foot><a href="https://github.com/ClickHouse/embeddings" target=_blank rel=noopener>About</a> | &copy; Alexey Milovidov, ClickHouse, Inc. (data: Multimedia Commons / WonderfulWeb / Hacker News)</div>
 <script>
 const DATA = __DATA__;
-const METRICS = { recall100:'Recall@100', recall10:'Recall@10', recall10in100:'Recall 10-in-100' };
+const METRICS = { recall_at_k:'Recall@k', recall10:'Recall@10' };
 const CORPORA = { photos:'Photos', web:'Web', hn:'HackerNews' };
 const CODECS = ['rabitq', 'turboquant'];
 const CODEC_LABEL = { rabitq:'RaBitQ', turboquant:'TurboQuant' };
 const MULTS = [...new Set(DATA.map(r => r.m))].sort((a,b)=>a-b);
-let st = { me:'recall100' };
+const KS    = [...new Set(DATA.map(r => r.k))].sort((a,b)=>a-b);
+let st = { k:(KS.includes(100) ? 100 : KS[0]), me:'recall_at_k' };
 const color = v => v==null ? '#222' : `hsl(${(v*120).toFixed(0)},75%,50%)`;
 const fmtB = n => n < 1024 ? n+'B' : (n/1024).toFixed(1).replace(/\.0$/,'')+'K';
-const cellKey = (co,ds,cd,m) => `${co}|${ds}|${cd}|${m}`;
+const cellKey = (co,ds,cd,k,m) => `${co}|${ds}|${cd}|${k}|${m}`;
 function buildSwitch(el, keys, cur, onPick, labels) {
   el.innerHTML = '';
   keys.forEach(k => {
@@ -90,13 +96,13 @@ function buildSwitch(el, keys, cur, onPick, labels) {
   });
 }
 function render() {
-  const m = {}; DATA.forEach(r => m[cellKey(r.co,r.ds,r.cd,r.m)] = r);
+  const m = {}; DATA.forEach(r => m[cellKey(r.co,r.ds,r.cd,r.k,r.m)] = r);
   // model rows, grouped by corpus, in the order the corpora appear in CORPORA
   const models = [];
   for (const co of Object.keys(CORPORA))
     for (const ds of [...new Set(DATA.filter(r => r.co===co).map(r => r.ds))]) models.push([co, ds]);
 
-  let h = `<table><caption>${METRICS[st.me]} &middot; k = 100 &middot; ~100k-row pool &middot; 20 queries</caption>`;
+  let h = `<table><caption>${METRICS[st.me]} &middot; k = ${st.k} &middot; ~100k-row pool &middot; 100 queries</caption>`;
   h += '<tr><th></th>' + CODECS.map(c => `<th class=grp colspan="${MULTS.length}">${CODEC_LABEL[c]}</th>`).join('') + '</tr>';
   h += '<tr><th class=cor>model&nbsp;\\&nbsp;multiplier</th>'
      + CODECS.map(() => MULTS.map(x => `<th>&times;${x}</th>`).join('')).join('') + '</tr>';
@@ -105,25 +111,26 @@ function render() {
     if (co !== lastCo) { h += `<tr><th class=cs colspan="${1 + CODECS.length*MULTS.length}">${CORPORA[co]}</th></tr>`; lastCo = co; }
     h += `<tr><th class=cor>${ds}</th>`;
     for (const cd of CODECS) for (const x of MULTS) {
-      const r = m[cellKey(co,ds,cd,x)];
+      const r = m[cellKey(co,ds,cd,st.k,x)];
       if (!r) { h += '<td class=na>&mdash;</td>'; continue; }
       const v = r[st.me];
       const flag = r.qz ? '' : ' &#9888;';
-      h += `<td class=cell data-k="${cellKey(co,ds,cd,x)}" data-v="${v}" data-cb="${r.cb}"`
+      h += `<td class=cell data-k="${cellKey(co,ds,cd,st.k,x)}" data-v="${v}" data-cb="${r.cb}"`
          + ` style="background:${color(v)}"`
-         + ` title="${CORPORA[co]} / ${ds} · ${CODEC_LABEL[cd]} · multiplier ${x} · ${r.dim}d · ${fmtB(r.cb)}/vector${r.qz?'':' · NOT quantized'}">`
+         + ` title="${CORPORA[co]} / ${ds} · ${CODEC_LABEL[cd]} · k=${r.k} · multiplier ${x} · ${r.ca} candidates · ${r.dim}d · ${fmtB(r.cb)}/vector${r.qz?'':' · NOT quantized'}">`
          + `${v.toFixed(3)}${flag}<span class=sz>${fmtB(r.cb)}</span></td>`;
     }
     h += '</tr>';
   }
   h += '</table>';
   document.getElementById('tbl').innerHTML = h;
-  const bad = DATA.filter(r => !r.qz);
+  const bad = DATA.filter(r => !r.qz && r.k === st.k);
   document.getElementById('warn').innerHTML = bad.length
     ? `&#9888; ${bad.length} config(s) did not use the quantized codes (full-precision fallback) &mdash; their recall is not meaningful.`
     : '';
   alignLeft();
 }
+buildSwitch(document.getElementById('sw-k'), KS, st.k, v => { st.k=+v; render(); });
 buildSwitch(document.getElementById('sw-me'), Object.keys(METRICS), st.me, k => { st.me=k; render(); }, METRICS);
 render();
 const _tbl = document.getElementById('tbl');

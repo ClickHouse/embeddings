@@ -9,7 +9,7 @@
 #   bench.cs_<label>_<codec>   : the same pool again, with `embedding` carrying CODEC(Quantized(...)).
 #                                Needed because that codec is CREATE TABLE-only -- it cannot be added to an
 #                                existing table by ALTER, so the codec pool has to be its own table.
-#   bench.qc_/gtc_<label>      : NQ query points + their exact top-100, computed FROM THE CODEC POOL with the
+#   bench.qc_/gtc_<label>      : NQ query points + their exact top-1000, computed FROM THE CODEC POOL with the
 #                                identical expression the benchmark's search uses -- cosineDistance over two
 #                                Array(BFloat16) operands. The older gt_* tables cast to Array(Float32) first,
 #                                and that precision gap let near-ties rank differently between ground truth and
@@ -63,15 +63,15 @@ setup_gt(){ L=$1
        SELECT rowNumberInAllBlocks(), md5, embedding
        FROM (SELECT md5, embedding FROM $P ORDER BY cityHash64(md5) LIMIT $NQ)"
 
-  q "CREATE TABLE bench.gtc_$L (q_idx UInt32, gt10 Array(String), gt100 Array(String))
+  # top-1000, sliced to 10/100/1000 -- the benchmark scores recall@k for every k the Explorer offers
+  q "CREATE TABLE bench.gtc_$L (q_idx UInt32, gt10 Array(String), gt100 Array(String), gt1000 Array(String))
      ENGINE = MergeTree ORDER BY q_idx"
   q "INSERT INTO bench.gtc_$L
-       SELECT q_idx,
-              arraySlice(arrayMap(t->t.2, arraySort(t->t.1, groupArray((dist,md5)))),1,10),
-              arrayMap(t->t.2, arraySort(t->t.1, groupArray((dist,md5))))
-       FROM (SELECT q.q_idx q_idx, s.md5 md5, cosineDistance(s.embedding, q.ref) dist
-             FROM $P s CROSS JOIN bench.qc_$L q WHERE s.md5 != q.q_md5
-             ORDER BY q_idx, dist ASC LIMIT 100 BY q_idx) GROUP BY q_idx"
+       SELECT q_idx, arraySlice(a,1,10), arraySlice(a,1,100), a
+       FROM (SELECT q_idx, arrayMap(t->t.2, arraySort(t->t.1, groupArray((dist,md5)))) AS a
+             FROM (SELECT q.q_idx q_idx, s.md5 md5, cosineDistance(s.embedding, q.ref) dist
+                   FROM $P s CROSS JOIN bench.qc_$L q WHERE s.md5 != q.q_md5
+                   ORDER BY q_idx, dist ASC LIMIT 1000 BY q_idx) GROUP BY q_idx)"
   echo "  gt $L: qc=$(n "SELECT count() FROM bench.qc_$L") gtc=$(n "SELECT count() FROM bench.gtc_$L")"
 }
 
