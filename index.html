@@ -1234,11 +1234,13 @@ function buildRepScales() {
                else if (wasIVF && v !== 'IVF') { rep.k = 100; rep.mult = 1; }
                switchRep(); });
     const codec = isCodecRep();
-    /// the two families are measured by different harnesses -> point the header link at the matching page
+    /// each family is measured by its own harness -> point the header link at the matching page
     const qc = document.getElementById('rc-qcmp');
     if (qc) {
-        qc.href = codec ? 'recall_codecs.html' : 'recall.html';
-        qc.innerHTML = codec ? 'Quality comparison (codecs) &#8599;' : 'Quality comparison &#8599;';
+        const ivf = !!repCfg().ivf;
+        qc.href = ivf ? 'recall_ivf.html' : codec ? 'recall_codecs.html' : 'recall.html';
+        qc.innerHTML = ivf ? 'Quality comparison (IVF) &#8599;'
+                     : codec ? 'Quality comparison (codecs) &#8599;' : 'Quality comparison &#8599;';
     }
     showCtl('rc-rot-w', !codec); showCtl('rc-bits-w', !codec); showCtl('rc-dims-w', !codec);
     showCtl('rc-k-w', codec); showCtl('rc-mult-w', codec);
