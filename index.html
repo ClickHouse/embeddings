@@ -1464,8 +1464,7 @@ async function runSimilar(more) {
             SELECT ${sel} FROM ${table}
             WHERE ${s.ivf ? `cid IN (SELECT toUInt32(cid) FROM ${s.centroids}
                 ORDER BY L2Distance(vec, CAST(q, 'Array(Float32)')) ASC
-                LIMIT ${IVF_NPROBE})
-              AND ` : ''}${KEY()} != {k:${C().keyType}}
+                LIMIT ${IVF_NPROBE})` : `${KEY()} != {k:${C().keyType}}`}
             ${tail} FORMAT JSONEachRowWithProgress`;
         /// BFloat16 cosineDistanceTransposed + scalar arg + parallel replicas hits a CH bug -> disable PR for it; Int8 ok
         const noPR = rep.type === 'BFloat16' ? '&enable_parallel_replicas=0' : '';
@@ -1475,7 +1474,7 @@ async function runSimilar(more) {
               (s.ivf ? `&enable_filesystem_cache=1&compatibility=26.11&max_threads=${IVF_THREADS}` : '')
             : '';
         const extra = `replace_running_query=1&use_query_cache=0${noPR}${vs}` +
-            `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`;
+            `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${s.ivf ? cnt + 1 : cnt}`;
         lastQuery = { sql, extra, table };                  /// for the SQL popup (showSQL)
         const url = chURL(extra);
         const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
@@ -1505,6 +1504,9 @@ async function runSimilar(more) {
             }
         }
         if (seq !== repSeq) return;                          /// a newer switch superseded this run (it owns repLoading)
+        /// IVF skips the `key != query` filter (it would read every probed row's key) and fetches one extra row
+        /// instead: drop the query itself here, so the grid still shows exactly `cnt` results.
+        if (s.ivf) rows = rows.filter(r => String(r.md5) !== String(md5)).slice(0, cnt);
         bar.style.display = 'none';
         if (isHN() && rows.length) { await attachHNMeta(rows); if (seq !== repSeq) return; }   /// fill by/text/ts from default.hackernews
         if (more) {
