@@ -222,12 +222,20 @@ const REPS = {
     'Int8|rotated':       { col: 'embedding_rotated_int', rot: true  },
     'RaBitQ|rotated':     { codec: true, suffix: 'rabitq',     avail: () => hasCodec() },
     'TurboQuant|rotated': { codec: true, suffix: 'turboquant',  avail: () => hasCodec() },
+    'IVF|rotated':        { codec: true, ivf: true, suffix: 'ivf', avail: () => hasIVF() },
 };
 /// Models that have the two codec sibling tables built, as `<emb table>_{rabitq,turboquant}`
 /// (e.g. mmcommons.emb_nomic -> mmcommons.emb_nomic_rabitq). Add a model here once both are loaded.
 const CODEC_MODELS = { photos: ['siglip2', 'nomic', 'clip'], web: ['img_siglip2', 'txt_bge_large'],
                        hn: ['nomic', 'bge_large'] };
 const hasCodec = () => (CODEC_MODELS[corpus] || []).includes(dataset);
+/// IVF rep: `<emb table>_ivf` (RaBitQ-coded rows tagged with their cluster `cid`) + `<emb table>_centroids` (cid, vec).
+/// The scan is limited to the IVF_NPROBE clusters whose centroids are nearest the query, then ranked as a codec rep.
+/// The query vector is read from the `_rabitq` sibling. Add a model here once its three tables exist.
+const IVF_MODELS = { photos: ['siglip2'] };
+const IVF_NPROBE = 64;
+const IVF_THREADS = 16;
+const hasIVF = () => (IVF_MODELS[corpus] || []).includes(dataset);
 let corpus = 'photos';    /// 'photos' (YFCC/Multimedia-Commons images) | 'hn' (HackerNews comments)
 let dataset = 'siglip2';
 let mode = 'points';      /// 'points' | 'thumbs'
@@ -406,6 +414,8 @@ function clampRep() {
 /// The map (tiles, hue range, hover, 3D preview) goes through projCfg()/C().emb() and must NOT be routed here.
 function searchCfg() {
     const r = repCfg();
+    if (r.ivf) { const e = C().emb(dataset);
+        return { codec: true, ivf: true, table: `${e}_ivf`, qtable: `${e}_rabitq`, centroids: `${e}_centroids`, col: 'embedding' }; }
     return r.codec ? { codec: true, table: `${C().emb(dataset)}_${r.suffix}`, col: 'embedding' }
                    : { codec: false, table: C().emb(dataset), col: r.col };
 }
@@ -436,6 +446,8 @@ async function tableRows(table) {
 }
 function showError(t) { const e = document.getElementById('error'); e.textContent = t; e.style.display = 'block'; }
 function hideError() { document.getElementById('error').style.display = 'none'; }
+/// < 1 s -> whole milliseconds, otherwise seconds with 2 decimals
+const fmtDur = secs => secs < 1 ? `${Math.round(secs * 1000)} ms` : `${secs.toFixed(2)} s`;
 function setStatus(t) { document.getElementById('status').textContent = t; }
 function fmtNum(n) { if (!isFinite(n)) return '—'; const u = ['', 'K', 'M', 'B', 'T']; let i = 0; while (n >= 1000 && i < 4) { n /= 1000; i++; } return (i && n < 10 ? n.toFixed(1) : Math.round(n)) + u[i]; }
 function fmtBytes(n) { if (!isFinite(n)) return '—'; const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i && n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + u[i]; }
@@ -1216,14 +1228,19 @@ function buildReportShell() {
 /// rotation/bits/dims, codec reps get nearest/multiplier (they have no bit-plane or dim truncation, and cannot page).
 const showCtl = (id, on) => { const e = document.getElementById(id); if (e) e.style.display = on ? 'flex' : 'none'; };
 function buildRepScales() {
-    buildSwitch('rc-type', ['BFloat16', 'Int8', 'RaBitQ', 'TurboQuant'].filter(repAvail), rep.type,
-        v => { rep.type = v; switchRep(); });
+    buildSwitch('rc-type', ['BFloat16', 'Int8', 'RaBitQ', 'TurboQuant', 'IVF'].filter(repAvail), rep.type,
+        v => { const wasIVF = rep.type === 'IVF'; rep.type = v;
+               if (v === 'IVF' && !wasIVF) { rep.k = 100; rep.mult = 10; }
+               else if (wasIVF && v !== 'IVF') { rep.k = 100; rep.mult = 1; }
+               switchRep(); });
     const codec = isCodecRep();
-    /// the two families are measured by different harnesses -> point the header link at the matching page
+    /// each family is measured by its own harness -> point the header link at the matching page
     const qc = document.getElementById('rc-qcmp');
     if (qc) {
-        qc.href = codec ? 'recall_codecs.html' : 'recall.html';
-        qc.innerHTML = codec ? 'Quality comparison (codecs) &#8599;' : 'Quality comparison &#8599;';
+        const ivf = !!repCfg().ivf;
+        qc.href = ivf ? 'recall_ivf.html' : codec ? 'recall_codecs.html' : 'recall.html';
+        qc.innerHTML = ivf ? 'Quality comparison (IVF) &#8599;'
+                     : codec ? 'Quality comparison (codecs) &#8599;' : 'Quality comparison &#8599;';
     }
     showCtl('rc-rot-w', !codec); showCtl('rc-bits-w', !codec); showCtl('rc-dims-w', !codec);
     showCtl('rc-k-w', codec); showCtl('rc-mult-w', codec);
@@ -1415,13 +1432,14 @@ async function runSimilar(more) {
         if (grid.children.length) grid.classList.add('loading');
         else grid.replaceChildren(...(isHN() ? [] : [thumbImg(md5, true)]));   /// HN: header shows the query comment
     }
-    bar.style.display = 'block'; barFill.style.width = '0%';
-    const desc = s.codec ? `${rep.type} · nearest ${rep.k} · ${rep.mult}× multiplier`
+    bar.style.display = s.ivf ? 'none' : 'block'; barFill.style.width = '0%';   /// IVF finishes before the first update
+    const desc = s.ivf ? `searching ${IVF_NPROBE} clusters · nearest ${rep.k} · ${rep.mult}× multiplier` : s.codec ? `${rep.type} · nearest ${rep.k} · ${rep.mult}× multiplier`
                          : `${col} · ${rep.bits} bits · ${rep.dims} dims`;
     stats.textContent = more ? 'loading more…' : `running: ${desc}…`;
     setStatus(more ? 'loading more…' : `top: ${s.codec ? rep.type + ' ' + rep.k + '/' + rep.mult + '×' : col + ' ' + rep.bits + 'b ' + rep.dims + 'd'}…`);
     try {
         const total = await tableRows(table);               /// bar denominator (progress.total_rows_to_read is unreliable w/ parallel replicas)
+        const nclusters = s.ivf ? await tableRows(s.centroids) : 0;
         if (seq !== repSeq) return;
         /// stable order (dist, md5) so OFFSET paging stays consistent across load-more scans
         /// Photos return md5,x,y (x,y drive the linear-projection overlay); HackerNews return id + x,y and then
@@ -1433,10 +1451,12 @@ async function runSimilar(more) {
             ? `toString(${KEY()}) AS md5, x, y`   /// HN: author/text/date fetched from default.hackernews after ranking (works for models w/o inline meta, e.g. bow)
             : `md5, x, y`;
         /// Codec reps take the whole vector as the query (no dims truncation) and rank with a plain cosineDistance.
-        const qsub = s.codec
+        const qsub = s.ivf
+            ? `(SELECT ${col} FROM ${s.qtable} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1)`
+            : s.codec
             ? `(SELECT ${col} FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1)`
             : `(SELECT arraySlice(CAST(${col}, 'Array(Float32)'), 1, {dims:UInt32}) FROM ${table} WHERE ${KEY()} = {k:${C().keyType}} LIMIT 1)`;
-        const dist = s.codec ? `cosineDistance(${col}, q)` : `${fn}(${col}, q, {bits:UInt8}, {dims:UInt32})`;
+        const dist = s.ivf ? `L2Distance(${col}, q)` : s.codec ? `cosineDistance(${col}, q)` : `${fn}(${col}, q, {bits:UInt8}, {dims:UInt32})`;
         /// QBit reps need the key tiebreak + OFFSET for consistent paging; codec reps never page, and only the bare
         /// `ORDER BY <distance> LIMIT k` shape is recognised, so they get neither.
         const tail = s.codec ? `ORDER BY ${dist} ASC
@@ -1444,16 +1464,19 @@ async function runSimilar(more) {
             LIMIT {off:UInt32}, {cnt:UInt32}`;
         const sql = `WITH ${qsub} AS q
             SELECT ${sel} FROM ${table}
-            WHERE ${KEY()} != {k:${C().keyType}}
+            WHERE ${s.ivf ? `cid IN (SELECT toUInt32(cid) FROM ${s.centroids}
+                ORDER BY L2Distance(vec, CAST(q, 'Array(Float32)')) ASC
+                LIMIT ${IVF_NPROBE})` : `${KEY()} != {k:${C().keyType}}`}
             ${tail} FORMAT JSONEachRowWithProgress`;
         /// BFloat16 cosineDistanceTransposed + scalar arg + parallel replicas hits a CH bug -> disable PR for it; Int8 ok
         const noPR = rep.type === 'BFloat16' ? '&enable_parallel_replicas=0' : '';
         const vs = s.codec
             ? `&vector_search_use_quantized_codes=1&vector_search_index_fetch_multiplier=${rep.mult}` +
-              `&query_plan_max_limit_for_lazy_materialization=10000&enable_parallel_replicas=0`
+              `&query_plan_max_limit_for_lazy_materialization=10000&enable_parallel_replicas=0` +
+              (s.ivf ? `&enable_filesystem_cache=1&compatibility=26.11&max_threads=${IVF_THREADS}` : '')
             : '';
         const extra = `replace_running_query=1&use_query_cache=0${noPR}${vs}` +
-            `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${cnt}`;
+            `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${s.ivf ? cnt + 1 : cnt}`;
         lastQuery = { sql, extra, table };                  /// for the SQL popup (showSQL)
         const url = chURL(extra);
         const resp = await fetch(url, { method: 'POST', body: sql, signal: ac.signal });
@@ -1471,6 +1494,7 @@ async function runSimilar(more) {
                 const o = JSON.parse(line);
                 if (o.progress) {
                     prog = o.progress;
+                    if (s.ivf) continue;
                     const rr = +prog.read_rows || 0, rb = +prog.read_bytes || 0, secs = (+prog.elapsed_ns || 0) / 1e9;
                     barFill.style.width = (total ? Math.min(rr / total, 1) * 100 : 0).toFixed(1) + '%';
                     stats.textContent = `${more ? 'loading more' : 'scanning'}: ${fmtNum(rr)} / ${fmtNum(total)} rows · ${fmtBytes(secs ? rb / secs : 0)}/s`;
@@ -1482,6 +1506,9 @@ async function runSimilar(more) {
             }
         }
         if (seq !== repSeq) return;                          /// a newer switch superseded this run (it owns repLoading)
+        /// IVF skips the `key != query` filter (it would read every probed row's key) and fetches one extra row
+        /// instead: drop the query itself here, so the grid still shows exactly `cnt` results.
+        if (s.ivf) rows = rows.filter(r => String(r.md5) !== String(md5)).slice(0, cnt);
         bar.style.display = 'none';
         if (isHN() && rows.length) { await attachHNMeta(rows); if (seq !== repSeq) return; }   /// fill by/text/ts from default.hackernews
         if (more) {
@@ -1504,9 +1531,12 @@ async function runSimilar(more) {
         hideError();
         document.getElementById('rc-count').textContent = `Top-${repLoaded} similar`;
         const secs = (+(prog && prog.elapsed_ns) || 0) / 1e9, rr = +(prog && prog.read_rows) || 0, rb = +(prog && prog.read_bytes) || 0;
-        stats.innerHTML = `${repLoaded} shown · <b>${secs.toFixed(2)} s</b> · ${fmtNum(secs ? rr / secs : 0)} rows/s · ` +
-            `${fmtBytes(secs ? rb / secs : 0)}/s · scanned ${fmtNum(rr)} rows`;
-        setStatus(`report: ${repLoaded} · ${secs.toFixed(2)}s`);
+        stats.innerHTML = s.ivf
+            ? `${repLoaded} shown · <b>${fmtDur(secs)}</b> · ${IVF_THREADS} threads · ${IVF_NPROBE} of ${nclusters.toLocaleString('en-US')} clusters · ` +
+              `read ${fmtNum(rr)} of ${fmtNum(total)} rows (${(total ? rr / total * 100 : 0).toFixed(2)}%)`
+            : `${repLoaded} shown · <b>${fmtDur(secs)}</b> · ${fmtNum(secs ? rr / secs : 0)} rows/s · ` +
+              `${fmtBytes(secs ? rb / secs : 0)}/s · scanned ${fmtNum(rr)} rows`;
+        setStatus(`report: ${repLoaded} · ${fmtDur(secs)}`);
         repLoading = false;
     } catch (err) {
         if (seq !== repSeq) return;                          /// superseded/aborted -> a newer run owns repLoading
