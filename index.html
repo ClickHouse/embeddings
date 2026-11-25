@@ -197,7 +197,7 @@
 </div>
 <div id="tagcloud"></div>
 <div id="dino">
-    <div id="dino-intro">This demo searches 1 billion vectors from the Dino-1B dataset. Exact top-100 neighbours
+    <div id="dino-intro">This demo searches 1 billion vectors of 1024 dimensions from the Dino-1B dataset. Exact top-100 neighbours
         (ground truth) are available for 100,000 query vectors.</div>
     <div class="dctl">
         <div><label for="dino-qid">Enter a query id between 0 and 99999</label>
@@ -1924,7 +1924,7 @@ function switchCorpus(k) {
 /// Not a map corpus: there are no projections or thumbnails, only ids. Picking it hides the map and shows #dino:
 /// a query id (a row of dino1b_query), its true neighbours from dino1b_gt, and the ids the IVF search returns.
 const DINO = { label: 'Dino-1b', query: 'ann.dino1b_query', gt: 'ann.dino1b_gt', ivf: 'ann.dino1b_ivf',
-               centroids: 'ann.dino1b_centroids_g256', nprobe: 64, threads: 16, maxQid: 99999, gtLen: 100 };
+               centroids: 'ann.dino1b_centroids_hnsw_shuf', nprobe: 64, threads: 16, maxQid: 99999, gtLen: 100 };
 let dinoOn = false, dinoSeq = 0, dinoAC = null, dinoShown = null;   /// dinoShown: query id the lists show
 const dino = { qid: null, k: 100, mult: 10 };
 const dinoGT = new Map();   /// qid -> its 100 true neighbour ids (as strings), fetched once
