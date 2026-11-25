@@ -73,6 +73,30 @@
     .opt { padding: .2em .5em; background: #333; border: 1px solid #000; cursor: pointer; user-select: none; }
     .opt:hover { background: #ff0; color: #000; }
     .opt.sel { background: #fff; color: #000; }
+    /* Dino-1b: a map-less view -- hide the map and everything that belongs to it, show #dino instead */
+    body.dino #map, body.dino #report, body.dino #rep-handle, body.dino #tagcloud, body.dino #full,
+    body.dino #hover, body.dino #hovertags, body.dino .mapctl { display: none !important; }
+    #dino { display: none; position: absolute; left: 0; right: 0; bottom: 0; top: 0; padding: .6em .8em;
+        flex-direction: column; gap: .45em; font-size: 13px; background: #111; box-sizing: border-box; }
+    body.dino #dino { display: flex; }
+    #dino .dctl { display: flex; flex-wrap: wrap; gap: .5em 1.2em; align-items: center; }
+    #dino label { color: #999; }
+    #dino-intro { color: #bbb; }
+    #dino-qid { width: 7em; background: #222; color: #fff; border: 1px solid #555; padding: .25em .4em;
+        font: 13px monospace; }
+    #dino-qid.bad { border-color: #f66; }
+    #dino-msg { color: #f66; min-height: 1em; }
+    #dino-msg:empty { display: none; }
+    #dino-stats { color: #ccc; font-size: 16px; line-height: 1.4; }
+    #dino-stats b { color: #8bc34a; font-weight: normal; }
+    #dino .dcols { flex: 1; min-height: 0; display: flex; gap: 1.5em; margin-top: 1.6em; transition: opacity .1s; }
+    #dino .dcols.loading { opacity: .35; }   /* same query, new nearest/multiplier: keep the old lists, dimmed */
+    #dino .dcol { display: flex; flex-direction: column; min-height: 0; }
+    #dino .dcol h4 { margin: 0 0 .3em; color: #ff0; font-weight: normal; font-size: 13px; white-space: nowrap; }
+    #dino .dcol pre { margin: 0; flex: 1; overflow-y: auto; font: 12px/1.35 monospace; color: #888;
+        padding-right: 1em; min-width: 9em; }
+    #dino .dcol pre .hit { color: #8bc34a; }   /* in both lists */
+    #dino a { color: #90caf9; }
     #hint3d { display: none; color: #999; }                          /* only in UMAP 3D (body.proj3d) */
     body.proj3d #hint3d { display: inline; }
     #status { margin-left: auto; color: #8bc34a; font-family: monospace; }
@@ -164,14 +188,32 @@
     <a id="proud" href="https://github.com/ClickHouse/ClickHouse" target="_blank" rel="noopener">Proudly made with <b>ClickHouse</b> open-source database</a>
     <b>Embeddings Explorer</b>
     <div class="grp"><label>corpus</label><span id="corpora"></span></div>
-    <div class="grp"><label>model</label><span id="datasets"></span></div>
-    <div class="grp" id="modes-grp"><label>mode</label><span id="modes"></span></div>
-    <div class="grp"><label>projection</label><span id="projs"></span></div>
-    <span id="hint3d">drag to rotate, right-drag or Ctrl/Cmd+drag to pan</span>
+    <div class="grp mapctl"><label>model</label><span id="datasets"></span></div>
+    <div class="grp mapctl" id="modes-grp"><label>mode</label><span id="modes"></span></div>
+    <div class="grp mapctl"><label>projection</label><span id="projs"></span></div>
+    <span id="hint3d" class="mapctl">drag to rotate, right-drag or Ctrl/Cmd+drag to pan</span>
     <span id="status">ready</span>
-    <span id="zoom" title="map zoom level"></span>
+    <span id="zoom" class="mapctl" title="map zoom level"></span>
 </div>
 <div id="tagcloud"></div>
+<div id="dino">
+    <div id="dino-intro">This demo searches 1 billion vectors from the Dino-1B dataset. Exact top-100 neighbours
+        (ground truth) are available for 100,000 query vectors.</div>
+    <div class="dctl">
+        <div><label for="dino-qid">Enter a query id between 0 and 99999</label>
+            <input id="dino-qid" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="0–99999">
+            <span class="opt" id="dino-go">search</span></div>
+        <div class="grp"><label>nearest</label><span id="dino-k"></span></div>
+        <div class="grp"><label>multiplier</label><span id="dino-mult"></span></div>
+        <a href="#" id="dino-sql">SQL</a>
+    </div>
+    <div id="dino-msg"></div>
+    <div id="dino-stats"></div>
+    <div class="dcols">
+        <div class="dcol"><h4 id="dino-gt-h">ground truth</h4><pre id="dino-gt"></pre></div>
+        <div class="dcol"><h4 id="dino-res-h">retrieved</h4><pre id="dino-res"></pre></div>
+    </div>
+</div>
 <div id="report"><div id="report-body"></div></div><div id="rep-handle" title="Drag to resize · double-click to reset"></div>
 <div id="full"><img id="full-img"><div id="full-comment"></div><div id="full-meta"></div></div>
 <img id="hover">
@@ -1473,9 +1515,9 @@ async function runSimilar(more) {
         const vs = s.codec
             ? `&vector_search_use_quantized_codes=1&vector_search_index_fetch_multiplier=${rep.mult}` +
               `&query_plan_max_limit_for_lazy_materialization=10000&enable_parallel_replicas=0` +
-              (s.ivf ? `&enable_filesystem_cache=1&compatibility=26.11&max_threads=${IVF_THREADS}` : '')
+              (s.ivf ? `&compatibility=26.11&max_threads=${IVF_THREADS}` : '')
             : '';
-        const extra = `replace_running_query=1&use_query_cache=0${noPR}${vs}` +
+        const extra = `replace_running_query=1&use_query_cache=0&enable_filesystem_cache=1${noPR}${vs}` +
             `&param_k=${encodeURIComponent(md5)}&param_bits=${rep.bits}&param_dims=${rep.dims}&param_off=${off}&param_cnt=${s.ivf ? cnt + 1 : cnt}`;
         lastQuery = { sql, extra, table };                  /// for the SQL popup (showSQL)
         const url = chURL(extra);
@@ -1878,8 +1920,133 @@ function switchCorpus(k) {
     resetView();
     updateURL();
 }
-buildSwitch('corpora', Object.keys(CORPORA).map(k => CORPORA[k].label), C().label, label =>
-    switchCorpus(Object.keys(CORPORA).find(c => CORPORA[c].label === label)));
+/// ---- Dino-1b: query-id search over ann.dino1b_* (1B DINOv2 vectors, big-ann-benchmarks) --------------------
+/// Not a map corpus: there are no projections or thumbnails, only ids. Picking it hides the map and shows #dino:
+/// a query id (a row of dino1b_query), its true neighbours from dino1b_gt, and the ids the IVF search returns.
+const DINO = { label: 'Dino-1b', query: 'ann.dino1b_query', gt: 'ann.dino1b_gt', ivf: 'ann.dino1b_ivf',
+               centroids: 'ann.dino1b_centroids_g256', nprobe: 64, threads: 16, maxQid: 99999, gtLen: 100 };
+let dinoOn = false, dinoSeq = 0, dinoAC = null, dinoShown = null;   /// dinoShown: query id the lists show
+const dino = { qid: null, k: 100, mult: 10 };
+const dinoGT = new Map();   /// qid -> its 100 true neighbour ids (as strings), fetched once
+const shortHost = h => String(h || '').replace(/^.*-server-/, '').replace(/-\d+$/, '') || '?';
+function enterDino() {
+    if (reportActive) hideReport();
+    dropHover(); hidePreview();
+    dinoOn = true; document.body.classList.add('dino');
+    placeDino();
+    buildSwitch('dino-k', [10, 100, 1000], dino.k, v => { dino.k = +v; runDino(); });
+    buildSwitch('dino-mult', [1, 5, 10], dino.mult, v => { dino.mult = +v; runDino(); });
+    if (dino.qid != null) document.getElementById('dino-qid').value = dino.qid;
+    setStatus('Dino-1b'); dinoURL();
+    document.getElementById('dino-qid').focus();
+}
+function exitDino() {
+    dinoOn = false; document.body.classList.remove('dino');
+    map.invalidateSize();   /// the map was display:none -> let Leaflet re-measure
+    setStatus('ready');
+}
+/// #dino starts below the header, whose height depends on how its rows wrap
+const placeDino = () => { document.getElementById('dino').style.top = document.getElementById('panel').offsetHeight + 'px'; };
+addEventListener('resize', () => { if (dinoOn) placeDino(); });
+function dinoURL() {
+    const p = new URLSearchParams({ corpus: 'dino', k: dino.k, mult: dino.mult });
+    if (dino.qid != null) p.set('qid', dino.qid);
+    history.replaceState(null, '', '#' + p.toString()); lastSig = null;
+}
+function dinoMsg(t) { document.getElementById('dino-msg').textContent = t || ''; }
+function parseQid() {
+    const el = document.getElementById('dino-qid'), v = el.value.trim();
+    const ok = /^\d{1,5}$/.test(v) && +v <= DINO.maxQid;
+    el.classList.toggle('bad', !ok && v !== '');
+    return ok ? +v : null;
+}
+async function runDino() {
+    const qid = parseQid();
+    if (qid == null) {
+        dinoMsg(document.getElementById('dino-qid').value.trim() ? `"${document.getElementById('dino-qid').value.trim()}" is not a query id: enter a whole number between 0 and ${DINO.maxQid}` : '');
+        return;
+    }
+    dinoMsg(''); dino.qid = qid; dinoURL();
+    const seq = ++dinoSeq, k = dino.k, kk = Math.min(k, DINO.gtLen);
+    if (dinoAC) dinoAC.abort();
+    const ac = dinoAC = new AbortController();
+    const stats = document.getElementById('dino-stats'), cols = document.querySelector('#dino .dcols');
+    const gtEl = document.getElementById('dino-gt'), resEl = document.getElementById('dino-res');
+    const gtH = document.getElementById('dino-gt-h'), resH = document.getElementById('dino-res-h');
+    if (qid !== dinoShown) {        /// a different query: the old ids are unrelated -> clear them now
+        gtEl.textContent = ''; resEl.textContent = '';
+        gtH.textContent = 'ground truth'; resH.textContent = 'retrieved';
+        cols.classList.remove('loading'); dinoShown = null;
+    } else cols.classList.add('loading');
+    stats.textContent = `running: query ${qid} · searching ${DINO.nprobe} clusters · nearest ${k} · ${dino.mult}× multiplier…`;
+    const sql = `WITH (SELECT vec FROM ${DINO.query} WHERE id = {qid:UInt64}) AS q
+  SELECT id, L2Distance(vec, q) AS dist, hostName() AS host
+  FROM ${DINO.ivf}
+  WHERE cid IN (SELECT toUInt32(cid) FROM ${DINO.centroids}
+                ORDER BY L2Distance(vec, CAST(q, 'Array(Float32)')) ASC
+                LIMIT ${DINO.nprobe})
+  ORDER BY L2Distance(vec, q) ASC
+  LIMIT {cnt:UInt32}
+  FORMAT JSONEachRowWithProgress`;
+    const extra = `use_query_cache=0&vector_search_use_quantized_codes=1&vector_search_index_fetch_multiplier=${dino.mult}` +
+        `&enable_parallel_replicas=0&enable_filesystem_cache=1&max_threads=${DINO.threads}&compatibility=26.11` +
+        `&param_qid=${qid}&param_cnt=${k}`;
+    lastQuery = { sql, extra, table: DINO.ivf };     /// for the SQL popup
+    try {
+        const gtP = dinoGT.has(qid) ? Promise.resolve(dinoGT.get(qid)) :
+            chQuery(`SELECT neighbors FROM ${DINO.gt} WHERE query_id = {qid:UInt32}`, { qid }, 'JSONEachRow', 'use_query_cache=0')
+                .then(r => r.text()).then(t => { const a = t.trim() ? JSON.parse(t.trim()).neighbors.map(String) : []; dinoGT.set(qid, a); return a; });
+        const resP = fetch(chURL(extra), { method: 'POST', body: sql, signal: ac.signal }).then(async r => {
+            const t = await r.text();
+            if (!r.ok) throw new Error(t);
+            let rows = [], prog = null, host = null;
+            for (const line of t.split('\n')) {
+                if (!line) continue;
+                const o = JSON.parse(line);
+                if (o.progress) prog = o.progress; else if (o.row) { rows.push(String(o.row.id)); host = host || o.row.host; }
+                else if (o.exception) throw new Error(o.exception);
+            }
+            return { rows, prog, host };
+        });
+        /// the ground truth usually lands well before the search -> show it as soon as it is here (new query only)
+        gtP.then(gt => {
+            if (seq !== dinoSeq || qid === dinoShown) return;
+            gtEl.textContent = gt.slice(0, kk).join('\n'); gtH.textContent = `ground truth · top ${Math.min(kk, gt.length)}`;
+        }).catch(() => {});
+        const [gt, { rows, prog, host }] = await Promise.all([gtP, resP]);
+        const [nrows, ncl] = await Promise.all([tableRows(DINO.ivf), tableRows(DINO.centroids)]);
+        if (seq !== dinoSeq) return;
+        const gtk = gt.slice(0, kk), gtSet = new Set(gtk), resSet = new Set(rows);
+        const hits = rows.slice(0, kk).filter(id => gtSet.has(id)).length;
+        const line = (id, hit) => `<span${hit ? ' class="hit"' : ''}>${id}</span>`;
+        gtEl.innerHTML = gtk.map(id => line(id, resSet.has(id))).join('\n');
+        resEl.innerHTML = rows.map(id => line(id, gtSet.has(id))).join('\n');
+        gtH.textContent = `ground truth · top ${gtk.length}`;
+        resH.textContent = `retrieved · ${rows.length}`;
+        cols.classList.remove('loading'); dinoShown = qid;
+        const secs = (+(prog && prog.elapsed_ns) || 0) / 1e9, rr = +(prog && prog.read_rows) || 0;
+        const where = host ? ` · <span title="${host}">replica ${shortHost(host)}</span>` : '';
+        const anyHits = k > kk ? ` (${gtk.filter(id => resSet.has(id)).length} of the true ${kk} are somewhere in the ${rows.length})` : '';
+        stats.innerHTML = `query ${qid} · ${rows.length} retrieved · <b>${fmtDur(secs)}</b> · recall@${kk} <b>${gtk.length ? (hits / kk).toFixed(2) : '—'}</b>${anyHits} · ` +
+            `${DINO.threads} threads · ${DINO.nprobe} of ${ncl.toLocaleString('en-US')} clusters · ` +
+            `read ${fmtNum(rr)} of ${fmtNum(nrows)} rows (${(nrows ? rr / nrows * 100 : 0).toFixed(2)}%)${where}`;
+        setStatus(`Dino-1b: ${rows.length} · ${fmtDur(secs)}`);
+    } catch (e) {
+        if (seq !== dinoSeq || e.name === 'AbortError') return;
+        cols.classList.remove('loading');
+        stats.textContent = 'error'; dinoMsg(String(e).slice(0, 500));
+    }
+}
+document.getElementById('dino-qid').addEventListener('keydown', e => { if (e.key === 'Enter') runDino(); });
+document.getElementById('dino-qid').addEventListener('input', () => { parseQid(); dinoMsg(''); });
+document.getElementById('dino-go').onclick = runDino;
+document.getElementById('dino-sql').onclick = e => { e.preventDefault(); showSQL(); };
+buildSwitch('corpora', [...Object.keys(CORPORA).map(k => CORPORA[k].label), DINO.label], C().label, label => {
+    if (label === DINO.label) { if (!dinoOn) enterDino(); return; }
+    const k = Object.keys(CORPORA).find(c => CORPORA[c].label === label);
+    if (dinoOn) { exitDino(); if (k === corpus) { updateURL(); return; } }
+    switchCorpus(k);
+});
 buildModelSwitch();
 buildModeSwitch();
 buildProjSwitch();
@@ -2174,6 +2341,7 @@ addEventListener('keydown', (e) => {
 function sigOf(p) { return ['corpus', 'ds', 'mode', 'proj', 'md5', 'type', 'rot', 'bits', 'dims', 'mult', 'k'].map(k => p.get(k) || '').join('|'); }
 let lastSig = null, restoring = false;
 function updateURL() {
+    if (dinoOn) { dinoURL(); return; }
     const c = latlngToData(map.getCenter());
     const p = new URLSearchParams();
     p.set('corpus', corpus); p.set('ds', dataset); p.set('mode', mode); p.set('proj', proj);
@@ -2194,6 +2362,8 @@ function selectSwitch(id, value) {   /// reflect a value in an already-built swi
 }
 /// re-apply the full state from a URL hash — for Back/Forward. restoring=true so nested updateURL() calls replace.
 function applyState(urlp) {
+    if (urlp.get('corpus') === 'dino') { dinoFromURL(urlp); return; }
+    if (dinoOn) { exitDino(); selectSwitch('corpora', C().label); }
     restoring = true;
     try {
         const nc = CORPORA[urlp.get('corpus')] ? urlp.get('corpus') : corpus;
@@ -2231,6 +2401,17 @@ function applyState(urlp) {
     } finally { restoring = false; }
 }
 addEventListener('popstate', () => applyState(new URLSearchParams(location.hash.slice(1))));
+/// #corpus=dino[&qid=..&k=..&mult=..] -> open the Dino-1b view (and run the search if a query id is given)
+function dinoFromURL(urlp) {
+    if ([10, 100, 1000].includes(+urlp.get('k'))) dino.k = +urlp.get('k');
+    if ([1, 5, 10].includes(+urlp.get('mult'))) dino.mult = +urlp.get('mult');
+    const q = urlp.get('qid');
+    if (q != null && /^\d{1,5}$/.test(q) && +q <= DINO.maxQid) dino.qid = +q;
+    selectSwitch('corpora', DINO.label);
+    enterDino();
+    if (dino.qid != null) runDino();
+}
+if (urlp.get('corpus') === 'dino') dinoFromURL(urlp);
 function updateZoomLabel() { const z = map.getZoom(); document.getElementById('zoom').textContent = 'zoom ' + (Number.isInteger(z) ? z : z.toFixed(1)); }
 map.on('zoomend', updateZoomLabel);
 map.on('moveend zoomend', updateURL);
